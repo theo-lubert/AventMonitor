@@ -2,6 +2,9 @@ import AppKit
 import AVFoundation
 import AVKit
 import Combine
+import os
+
+private let videoLog = Logger(subsystem: "fr.teos.AventMonitor", category: "video")
 
 /// One live camera: RTSP from the embedded bridge, through a `MediaPipeline`, to a
 /// display layer shown in a native window or in system Picture in Picture.
@@ -82,6 +85,7 @@ final class CameraStream: NSObject, ObservableObject {
     private var retryWork: DispatchWorkItem?
     private var retryDelay: TimeInterval = 1
     private var connectStarted = Date()
+    private var appNapGuard: NSObjectProtocol?
 
     init(cameraID: String, name: String) {
         self.cameraID = cameraID
@@ -96,7 +100,7 @@ final class CameraStream: NSObject, ObservableObject {
         onPipeline { [weak self] pipeline in
             pipeline.muted = muted
             pipeline.onDisplay = { sample in
-                if renderer.status == .failed { renderer.flush() }
+                Self.recoverIfStalled(renderer)
                 renderer.enqueue(sample)
             }
             pipeline.onFirstFrame = { self?.onMain { $0.didReceiveFirstFrame() } }
@@ -107,6 +111,28 @@ final class CameraStream: NSObject, ObservableObject {
             pipeline.onActivity = { kind in self?.onMain { $0.onActivity?(kind) } }
             pipeline.onThumbnail = { image in self?.onMain { $0.onThumbnail?(image) } }
         }
+    }
+
+    /// A renderer that failed, or that needs a flush to resume (after a display or GPU
+    /// change, or the screen locking), keeps its last image or goes black while we keep
+    /// enqueuing frames. A live stream never needs a backlog, so one that stopped
+    /// draining is flushed too. Runs on the I/O queue before each frame.
+    private nonisolated static func recoverIfStalled(_ renderer: AVSampleBufferVideoRenderer) {
+        let reason: String
+        if renderer.status == .failed {
+            reason = "failed: \(renderer.error?.localizedDescription ?? "unknown error")"
+        } else if renderer.requiresFlushToResumeDecoding {
+            reason = "requires flush to resume decoding"
+        } else if !renderer.isReadyForMoreMediaData {
+            // Also happens while the window is minimized, so not worth persisting.
+            videoLog.debug("Flushing video renderer: not ready for more data")
+            renderer.flush()
+            return
+        } else {
+            return
+        }
+        videoLog.notice("Flushing video renderer: \(reason, privacy: .public)")
+        renderer.flush()
     }
 
     /// Runs `body` on the I/O queue, which owns the pipeline.
@@ -128,6 +154,11 @@ final class CameraStream: NSObject, ObservableObject {
     func start() {
         guard !running else { return }
         running = true
+        // In PiP our own windows are hidden, so macOS would App Nap the app after a while
+        // and throttle the stream feeding the PiP window.
+        appNapGuard = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Live camera stream")
         retryDelay = 1
         connect()
         watchdog = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -137,6 +168,8 @@ final class CameraStream: NSObject, ObservableObject {
 
     func stop() {
         running = false
+        if let appNapGuard { ProcessInfo.processInfo.endActivity(appNapGuard) }
+        appNapGuard = nil
         watchdog?.invalidate()
         watchdog = nil
         retryWork?.cancel()
@@ -169,6 +202,8 @@ final class CameraStream: NSObject, ObservableObject {
         status = .connecting
         connectStarted = Date()
         onPipeline { $0.reset() }
+        // A new connection restarts timestamps at zero: drop anything queued on the old timeline.
+        layer.sampleBufferRenderer.flush()
         soundLevel = nil
 
         let c = RTSPClient(url: url, queue: ioQueue)
