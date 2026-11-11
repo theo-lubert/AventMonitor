@@ -1,0 +1,3 @@
+[submodule "Vendor/aventproxy"]
+	path = Vendor/aventproxy
+	url = https://github.com/thekoma/aventproxy.git

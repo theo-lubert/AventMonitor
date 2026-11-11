@@ -1,0 +1,13 @@
+# Build output
+Build/
+DerivedData/
+.build/
+
+# Generated
+*.xcodeproj/
+Core/keys_gen.go
+
+# Local signing identity (see Config/Signing.xcconfig)
+Config/Signing.local.xcconfig
+
+.DS_Store

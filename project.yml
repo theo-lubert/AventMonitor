@@ -1,0 +1,79 @@
+name: AventMonitor
+options:
+  bundleIdPrefix: fr.teos
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+targets:
+  AventMonitor:
+    type: application
+    platform: macOS
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    scheme:
+      testTargets: [AventMonitorTests]
+    sources:
+      - path: Sources
+        excludes: ["**/*.h"]
+      - path: Resources
+        excludes: ["camera.svg", "favicon.svg"]
+    info:
+      path: Build/Info.plist
+      properties:
+        CFBundleName: Baby Monitor
+        CFBundleDisplayName: Baby Monitor
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.utilities
+        LSMinimumSystemVersion: "15.0"
+        NSHumanReadableCopyright: "Built on aventproxy (MIT). Not affiliated with Philips or Tuya."
+        NSLocalNetworkUsageDescription: "Baby Monitor peut joindre votre caméra directement sur le réseau local pour un flux plus rapide."
+    settings:
+      base:
+        PRODUCT_NAME: Baby Monitor
+        PRODUCT_MODULE_NAME: AventMonitor
+        PRODUCT_BUNDLE_IDENTIFIER: fr.teos.AventMonitor
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Core/BridgingHeader.h
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/Build/core
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/Build/core
+        OTHER_LDFLAGS: -laventcore -lresolv -framework CoreFoundation -framework Security -framework SystemConfiguration
+        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        DEAD_CODE_STRIPPING: YES
+    preBuildScripts:
+      - name: Build AventCore (aventproxy, Go)
+        script: '"$PROJECT_DIR/Scripts/build-core.sh"'
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(PROJECT_DIR)/Build/core/libaventcore.a
+
+  # Unit tests for the stream parsers. They compile those sources directly,
+  # so they run without the app, the Go core or a camera.
+  AventMonitorTests:
+    type: bundle.unit-test
+    platform: macOS
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    sources:
+      - Tests
+      - Sources/Stream/RTSPClient.swift
+      - Sources/Stream/H264Assembler.swift
+      - Sources/Stream/SampleAttachments.swift
+      - Sources/Stream/AudioOutput.swift
+      - Sources/Stream/SoundMeter.swift
+      - Sources/Stream/MotionDetector.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fr.teos.AventMonitorTests
+        GENERATE_INFOPLIST_FILE: YES

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <g fill="#FFFFFF" transform="translate(-55 -4)">
+    <!-- Antenne -->
+    <path d="M173 76 V30 a10 10 0 0 1 20 0 V76 Z"/>
+    <!-- Corps avec l'objectif évidé -->
+    <path fill-rule="evenodd" d="M153 76 H213 a3 3 0 0 1 3 3 V180 C216 198 200 210 183 210 C166 210 150 198 150 180 V79 a3 3 0 0 1 3 -3 Z M183 103 a25 25 0 1 0 0.001 0 Z"/>
+    <!-- Lentille -->
+    <circle cx="183" cy="128" r="15"/>
+    <!-- Pied -->
+    <rect x="178" y="206" width="10" height="20"/>
+    <rect x="140" y="224" width="86" height="20" rx="2"/>
+  </g>
+</svg>
