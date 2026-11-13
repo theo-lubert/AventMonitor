@@ -176,13 +176,28 @@ final class AudioTests: XCTestCase {
         XCTAssertEqual(levels, [0])
         meter.push(Data(repeating: 0x80, count: 800)) // 100 ms at full scale
         XCTAssertEqual(levels, [0, 3])
-        XCTAssertEqual(loud, 1)
+        XCTAssertEqual(loud, 0, "a single loud window is a click, not sound")
 
         // The level is held for 500 ms, then released one step at a time.
         meter.push(Data(repeating: 0xFF, count: 800 * 4))
         XCTAssertEqual(levels, [0, 3])
         meter.push(Data(repeating: 0xFF, count: 800))
         XCTAssertEqual(levels, [0, 3, 2])
+    }
+
+    func testSoundMeterNeedsSustainedSound() {
+        let meter = SoundMeter()
+        var loud = 0
+        meter.onLoud = { loud += 1 }
+        let window = 800 // 100 ms
+        meter.push(Data(repeating: 0x80, count: window * (SoundMeter.loudWindowsNeeded - 1)))
+        XCTAssertEqual(loud, 0)
+        meter.push(Data(repeating: 0x80, count: window))
+        XCTAssertEqual(loud, 1)
+        // Silence resets the count.
+        meter.push(Data(repeating: 0xFF, count: window))
+        meter.push(Data(repeating: 0x80, count: window))
+        XCTAssertEqual(loud, 1)
     }
 }
 

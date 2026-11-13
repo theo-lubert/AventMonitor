@@ -51,11 +51,21 @@ final class CameraStream: NSObject, ObservableObject {
     @Published private(set) var soundLevel: Int?
     @Published var muted = UserDefaults.standard.bool(forKey: DefaultsKey.muted) {
         didSet {
-            let muted = muted
-            onPipeline { $0.muted = muted }
+            applyMute()
             UserDefaults.standard.set(muted, forKey: DefaultsKey.muted)
         }
     }
+
+    /// Talking through the camera: `preparing` while the bridge reopens the stream with a
+    /// return channel, `ready` once it can carry our voice, `talking` while the mic is open.
+    enum TalkState: Equatable {
+        case off, preparing, ready, talking
+        case failed(String)
+
+        var isActive: Bool { self == .preparing || self == .ready || self == .talking }
+    }
+
+    @Published private(set) var talk: TalkState = .off
     @Published var pinned = UserDefaults.standard.bool(forKey: DefaultsKey.pinned) {
         didSet {
             applyPin()
@@ -71,6 +81,10 @@ final class CameraStream: NSObject, ObservableObject {
     var onActivity: ((ActivityCenter.Kind) -> Void)?
     /// Called with an occasional still, for the panel's thumbnail.
     var onThumbnail: ((CGImage) -> Void)?
+    /// Asks the app to serve this camera with a return audio channel, or to stop.
+    var onTalkbackWanted: ((Bool) -> Void)?
+    /// Whether the bridge currently offers return channels.
+    var talkbackActive: () -> Bool = { false }
 
     /// Time since the last video frame, for display.
     var secondsSinceLastFrame: TimeInterval { pipeline.secondsSinceLastFrame }
@@ -94,6 +108,14 @@ final class CameraStream: NSObject, ObservableObject {
     private var retryDelay: TimeInterval = 1
     private var connectStarted = Date()
     private var appNapGuard: NSObjectProtocol?
+    private var backchannel: G711.Law?
+    private var microphone: MicrophoneCapture?
+    private var talkTimeout: DispatchWorkItem?
+
+    /// Talk mode ends by itself after this long without talking, because the return channel
+    /// interferes with lullabies (aventproxy #72) and should not stay open by accident.
+    static let talkIdleTimeout: TimeInterval = 180
+    static let talkPrepareTimeout: TimeInterval = 45
 
     init(cameraID: String, name: String) {
         self.cameraID = cameraID
@@ -172,6 +194,7 @@ final class CameraStream: NSObject, ObservableObject {
     }
 
     func stop() {
+        if talk != .off { endTalk() }
         running = false
         if let appNapGuard { ProcessInfo.processInfo.endActivity(appNapGuard) }
         appNapGuard = nil
@@ -209,9 +232,16 @@ final class CameraStream: NSObject, ObservableObject {
         onPipeline { $0.reset() }
         soundLevel = nil
 
+        stopMicrophone()
+        backchannel = nil
+        if talk == .ready || talk == .talking { talk = .preparing }
+
         let c = RTSPClient(url: url, queue: ioQueue)
         let pipeline = pipeline
         c.onPacket = { media, data in pipeline.push(media, data) }
+        c.onPlaying = { [weak self] law in
+            DispatchQueue.main.async { self?.didStartPlaying(backchannel: law) }
+        }
         c.onClose = { [weak self] error in
             DispatchQueue.main.async { self?.connectionClosed(error) }
         }
@@ -223,6 +253,9 @@ final class CameraStream: NSObject, ObservableObject {
         guard running else { return }
         videoLog.notice("\(self.name, privacy: .public): connection closed: \(error?.localizedDescription ?? "no error", privacy: .public)")
         client = nil
+        stopMicrophone()
+        backchannel = nil
+        if talk == .ready || talk == .talking { talk = .preparing }
         status = .failed(error?.localizedDescription ?? "Flux interrompu")
         scheduleRetry()
     }
@@ -256,6 +289,118 @@ final class CameraStream: NSObject, ObservableObject {
         default:
             break
         }
+    }
+
+    // MARK: Talk
+
+    /// Enters talk mode: asks for the microphone, then for a stream with a return channel.
+    func beginTalk() {
+        guard !talk.isActive else { return }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            prepareTalk()
+        case .notDetermined:
+            talk = .preparing
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.talk == .preparing else { return }
+                    if granted { self.prepareTalk() } else { self.failTalk("Accès au micro refusé") }
+                }
+            }
+        default:
+            talk = .failed("Autorisez le micro dans Réglages Système › Confidentialité et sécurité › Micro")
+        }
+    }
+
+    private func prepareTalk() {
+        talk = .preparing
+        scheduleTalkTimeout(Self.talkPrepareTimeout) { [weak self] in
+            self?.failTalk("La caméra n'a pas ouvert le micro à temps")
+        }
+        if backchannel != nil {
+            talkReady()
+        } else {
+            onTalkbackWanted?(true)
+        }
+    }
+
+    private func didStartPlaying(backchannel law: G711.Law?) {
+        guard running else { return }
+        backchannel = law
+        guard talk == .preparing else { return }
+        if law != nil {
+            talkReady()
+        } else if talkbackActive() {
+            failTalk("Le pont n'a pas proposé de canal retour")
+        }
+        // Otherwise the bridge is still restarting with talkback; it will reconnect us.
+    }
+
+    private func talkReady() {
+        talk = .ready
+        scheduleTalkTimeout(Self.talkIdleTimeout) { [weak self] in self?.endTalk() }
+    }
+
+    /// Opens the microphone, while the button or the space bar is held.
+    func startTalking() {
+        guard talk == .ready, let law = backchannel, let client else { return }
+        talkTimeout?.cancel()
+        let mic = MicrophoneCapture(law: law, queue: ioQueue) { frame in client.sendAudio(frame) }
+        do {
+            try mic.start()
+        } catch {
+            failTalk(error.localizedDescription)
+            return
+        }
+        microphone = mic
+        talk = .talking
+        applyMute() // the camera's sound would come back through our microphone
+    }
+
+    func stopTalking() {
+        guard talk == .talking else { return }
+        stopMicrophone()
+        client?.endTalkspurt()
+        talkReady()
+        applyMute()
+    }
+
+    /// Leaves talk mode and lets the bridge drop the return channel.
+    func endTalk() {
+        let wasActive = talk.isActive
+        talkTimeout?.cancel()
+        stopMicrophone()
+        talk = .off
+        applyMute()
+        if wasActive { onTalkbackWanted?(false) }
+    }
+
+    /// Called by the app when the bridge could not be restarted with talkback.
+    func talkUnavailable(_ message: String) {
+        guard talk.isActive else { return }
+        failTalk(message)
+    }
+
+    private func failTalk(_ message: String) {
+        endTalk()
+        talk = .failed(message)
+    }
+
+    private func stopMicrophone() {
+        microphone?.stop()
+        microphone = nil
+    }
+
+    private func scheduleTalkTimeout(_ delay: TimeInterval, _ body: @escaping () -> Void) {
+        talkTimeout?.cancel()
+        let work = DispatchWorkItem(block: body)
+        talkTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func applyMute() {
+        let silent = muted || talk == .talking
+        onPipeline { $0.muted = silent }
     }
 
     // MARK: Window

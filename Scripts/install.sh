@@ -6,9 +6,17 @@ DD="${DERIVED_DATA:-$PWD/.build/DerivedData}"
 APP_NAME="Baby Monitor"
 DEST="$HOME/Applications/$APP_NAME.app"
 
-[[ -d AventMonitor.xcodeproj ]] || xcodegen generate
-xcodebuild -project AventMonitor.xcodeproj -scheme AventMonitor -configuration Release \
-  -derivedDataPath "$DD" build | grep -E "error:|\*\* BUILD" || true
+# Always regenerate: project.yml may list files a stale project does not know.
+xcodegen generate --quiet
+LOG="$DD/install-build.log"
+mkdir -p "$DD"
+# A failed build must stop here, or the previous product would be installed.
+if ! xcodebuild -project AventMonitor.xcodeproj -scheme AventMonitor -configuration Release \
+  -derivedDataPath "$DD" build >"$LOG" 2>&1; then
+  grep -E "error:" "$LOG" >&2 || tail -20 "$LOG" >&2
+  echo "Release build failed, nothing installed (log: $LOG)" >&2
+  exit 1
+fi
 APP="$DD/Build/Products/Release/$APP_NAME.app"
 [[ -d "$APP" ]] || { echo "Build not found: $APP" >&2; exit 1; }
 

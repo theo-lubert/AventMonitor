@@ -5,7 +5,7 @@ struct CameraWindowView: View {
     let cameraID: String
 
     var body: some View {
-        CameraPlayerView(stream: model.stream(for: cameraID))
+        CameraPlayerView(stream: model.stream(for: cameraID), room: model.room(for: cameraID))
     }
 }
 
@@ -13,8 +13,15 @@ private struct CameraPlayerView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismissWindow) private var dismissWindow
     @ObservedObject var stream: CameraStream
+    @ObservedObject var room: RoomControls
     @State private var hovering = false
     @State private var window: NSWindow?
+    @State private var popover: Popover?
+
+    private enum Popover { case light, lullaby }
+
+    /// The bar stays up while one of its popovers is open, or they would lose their anchor.
+    private var showsControls: Bool { hovering || stream.status != .live || popover != nil }
 
     var body: some View {
         ZStack {
@@ -32,21 +39,27 @@ private struct CameraPlayerView: View {
                 .padding(.vertical, 44) // clear of the activity pills and the controls
             }
             VStack {
-                HStack {
+                HStack(alignment: .top) {
                     ActivityPills(activity: model.activity, cameraID: stream.cameraID)
                     Spacer()
+                    RoomStatusPills(room: room)
                 }
                 Spacer()
             }
             .padding(12)
-            VStack {
+            VStack(spacing: 10) {
                 Spacer()
-                if hovering || stream.status != .live {
+                if stream.talk != .off {
+                    TalkOverlay(stream: stream, window: window)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
+                if showsControls {
                     controls
                         .transition(.opacity)
                 }
             }
             .padding(12)
+            .animation(.easeInOut(duration: 0.15), value: stream.talk)
         }
         .frame(minWidth: 320, minHeight: 180)
         .aspectRatio(stream.videoSize.width / max(stream.videoSize.height, 1), contentMode: .fit)
@@ -56,8 +69,14 @@ private struct CameraPlayerView: View {
             stream.attach(window: w)
             if window !== w { DispatchQueue.main.async { window = w } }
         })
-        .onAppear { stream.start() }
-        .onDisappear { model.closeStream(stream.cameraID) }
+        .onAppear {
+            stream.start()
+            room.watch()
+        }
+        .onDisappear {
+            room.unwatch()
+            model.closeStream(stream.cameraID)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .closeCameraWindow)) { note in
             if note.object as? String == stream.cameraID { close() }
         }
@@ -90,6 +109,18 @@ private struct CameraPlayerView: View {
                 }
             }
             Spacer(minLength: 8)
+            ControlButton(systemImage: room.state?.nightLight == true ? "lightbulb.fill" : "lightbulb",
+                          help: "Veilleuse", active: room.state?.nightLight == true) { popover = .light }
+                .popover(isPresented: popoverBinding(.light), arrowEdge: .top) { NightLightControls(room: room) }
+            ControlButton(systemImage: "music.note", help: "Berceuses et sons",
+                          active: room.state?.lullabyPlaying == true) { popover = .lullaby }
+                .popover(isPresented: popoverBinding(.lullaby), arrowEdge: .top) { LullabyControls(room: room) }
+            ControlButton(systemImage: stream.talk.isActive ? "mic.fill" : "mic",
+                          help: stream.talk.isActive ? "Arrêter de parler" : "Parler dans la chambre (met une berceuse en pause)",
+                          active: stream.talk.isActive) {
+                stream.talk.isActive ? stream.endTalk() : stream.beginTalk()
+            }
+            Divider().frame(height: 16).overlay(Color.white.opacity(0.25))
             ControlButton(systemImage: stream.muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                           help: stream.muted ? "Activer le son" : "Couper le son") { stream.muted.toggle() }
             ControlButton(systemImage: stream.pinned ? "pin.fill" : "pin",
@@ -104,20 +135,28 @@ private struct CameraPlayerView: View {
         .padding(.vertical, 8)
         .background(.ultraThinMaterial.opacity(0.9), in: Capsule())
         .environment(\.colorScheme, .dark)
-        .frame(maxWidth: 520)
+        .frame(maxWidth: 560)
+    }
+
+    private func popoverBinding(_ which: Popover) -> Binding<Bool> {
+        Binding(get: { popover == which }, set: { if !$0, popover == which { popover = nil } })
     }
 }
 
 private struct ControlButton: View {
     let systemImage: String
     let help: String
+    var active = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 14, weight: .semibold))
-                .frame(width: 22, height: 22)
+                .foregroundStyle(active ? Color(red: 1, green: 0.84, blue: 0.47) : .white)
+                .frame(width: 24, height: 22)
+                .background(active ? Color(red: 1, green: 0.84, blue: 0.47).opacity(0.22) : .clear,
+                            in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -59,6 +59,10 @@ final class AppModel: ObservableObject {
     private var liveObservers: [String: AnyCancellable] = [:]
 
     private var streams: [String: CameraStream] = [:]
+    private var rooms: [String: RoomControls] = [:]
+    /// Cameras the user is talking through. The bridge offers return channels while any is.
+    private var talkbackCameras: Set<String> = []
+    private var bridgeTask: Task<Void, Never>?
 
     enum DefaultsKey {
         static let dock = "showDockIcon"
@@ -164,6 +168,9 @@ final class AppModel: ObservableObject {
     func logout() {
         for stream in streams.values { stream.stop() }
         streams.removeAll()
+        for room in rooms.values { room.shutdown() }
+        rooms.removeAll()
+        talkbackCameras.removeAll()
         liveObservers.removeAll()
         thumbnails.removeAll()
         activity.clearAll()
@@ -218,7 +225,8 @@ final class AppModel: ObservableObject {
             return
         }
         let info: BridgeInfo = try await AventCore.call(
-            "startBridge", StartBridgeParams(session: s, cameras: cameras, port: Self.preferredBridgePort))
+            "startBridge", StartBridgeParams(session: s, cameras: cameras, port: Self.preferredBridgePort,
+                                             talkback: !talkbackCameras.isEmpty))
         guard isCurrent(s) else {
             AventCore.stopBridgeNow() // logged out meanwhile: don't leave it serving
             return
@@ -236,6 +244,48 @@ final class AppModel: ObservableObject {
 
     func camera(_ id: String) -> Camera? { cameras.first { $0.id == id } }
 
+    // MARK: Room controls
+
+    /// Night light, lullabies and temperature of a camera.
+    func room(for cameraID: String) -> RoomControls {
+        if let r = rooms[cameraID] { return r }
+        let r = RoomControls(cameraID: cameraID, transport: RoomTransport(
+            fetch: { [weak self] id in
+                guard let s = self?.session else { throw CoreError(code: "", message: "Non connecté") }
+                return try await AventCore.call("deviceState", DeviceParams(session: s, id: id))
+            },
+            send: { [weak self] id, dps in
+                guard let s = self?.session else { throw CoreError(code: "", message: "Non connecté") }
+                let _: SentResult = try await AventCore.call("setDps", SetDPSParams(session: s, id: id, dps: dps))
+            }))
+        rooms[cameraID] = r
+        return r
+    }
+
+    private struct SentResult: Decodable { let sent: Bool }
+
+    /// Restarts the bridge with or without return channels. Restarts are queued, so
+    /// quick toggles apply in order and the last one wins.
+    private func setTalkback(_ on: Bool, for cameraID: String) {
+        if on { talkbackCameras.insert(cameraID) } else { talkbackCameras.remove(cameraID) }
+        let previous = bridgeTask
+        bridgeTask = Task { [weak self] in
+            await previous?.value
+            guard let self, self.session != nil else { return }
+            let wanted = !self.talkbackCameras.isEmpty
+            if self.bridge?.talkback == wanted {
+                // Already right; a stream that connected before it was needs to reconnect.
+                if wanted, on { self.streams[cameraID]?.restart() }
+                return
+            }
+            do {
+                try await self.startBridge()
+            } catch {
+                for id in self.talkbackCameras { self.streams[id]?.talkUnavailable(error.localizedDescription) }
+            }
+        }
+    }
+
     // MARK: Streams
 
     func stream(for cameraID: String) -> CameraStream {
@@ -245,6 +295,8 @@ final class AppModel: ObservableObject {
         s.onPiPDismissed = { [weak self] in self?.closeWindow(cameraID) }
         s.onActivity = { [weak self] kind in self?.activity.report(kind, camera: cameraID) }
         s.onThumbnail = { [weak self] image in self?.thumbnails.store(image, for: cameraID) }
+        s.onTalkbackWanted = { [weak self] on in self?.setTalkback(on, for: cameraID) }
+        s.talkbackActive = { [weak self] in self?.bridge?.talkback == true }
         // Lost: was live, then dropped while still open. Stopping goes to .idle, which is not lost.
         var wasLive = false
         liveObservers[cameraID] = s.$status

@@ -2,7 +2,9 @@ import Foundation
 import Network
 
 /// Minimal RTSP client for the embedded bridge: DESCRIBE, SETUP (RTP over the
-/// RTSP TCP connection), PLAY, keep-alive. Everything runs on `queue`.
+/// RTSP TCP connection), PLAY, keep-alive. When the bridge offers a return audio
+/// channel (talkback), it is set up too and `sendAudio` talks through the camera.
+/// Everything runs on `queue`.
 final class RTSPClient {
     enum Media { case video, audio }
 
@@ -27,6 +29,8 @@ final class RTSPClient {
 
     var onPacket: ((Media, Data) -> Void)?
     var onClose: ((Error?) -> Void)?
+    /// After PLAY, with the return channel's codec when there is one.
+    var onPlaying: ((G711.Law?) -> Void)?
 
     private let url: URL
     private let queue: DispatchQueue
@@ -40,6 +44,9 @@ final class RTSPClient {
     private var keepAlive: DispatchSourceTimer?
     private var finished = false
     private var stopped = false
+    private static let backchannelChannel: UInt8 = 4
+    private var backchannel: RTPPacketizer?
+    private var backchannelLaw: G711.Law?
 
     init(url: URL, queue: DispatchQueue) {
         self.url = url
@@ -95,26 +102,39 @@ final class RTSPClient {
             guard video.codec.uppercased().hasPrefix("H264") else {
                 return finish(Failure.unsupported(video.codec))
             }
-            let audio = media.first(where: { $0.kind == "audio" && $0.codec.uppercased().hasPrefix("PCMU") })
-            setup(Self.resolve(video.control, base: base), interleaved: 0, media: .video) { [self] in
-                if let audio {
-                    setup(Self.resolve(audio.control, base: base), interleaved: 2, media: .audio, optional: true) { [self] in play() }
-                } else {
+            let audio = media.first(where: { $0.kind == "audio" && !$0.isBackchannel && $0.codec.uppercased().hasPrefix("PCMU") })
+            let back = media.first(where: \.isBackchannel)
+            let setUpBackchannel = { [self] in
+                guard let back, let law = G711.Law(codec: back.codec) else { return play() }
+                setup(Self.resolve(back.control, base: base), interleaved: Self.backchannelChannel, media: nil, optional: true) { [self] ok in
+                    if ok {
+                        backchannelLaw = law
+                        backchannel = RTPPacketizer(payloadType: law.payloadType)
+                    }
                     play()
+                }
+            }
+            setup(Self.resolve(video.control, base: base), interleaved: 0, media: .video) { [self] _ in
+                if let audio {
+                    setup(Self.resolve(audio.control, base: base), interleaved: 2, media: .audio, optional: true) { _ in setUpBackchannel() }
+                } else {
+                    setUpBackchannel()
                 }
             }
         }
     }
 
-    private func setup(_ control: String, interleaved ch: UInt8, media: Media, optional: Bool = false, then next: @escaping () -> Void) {
+    /// `media` is nil for the return channel, which we send on rather than receive.
+    private func setup(_ control: String, interleaved ch: UInt8, media: Media?, optional: Bool = false,
+                       then next: @escaping (_ ok: Bool) -> Void) {
         send("SETUP", control, ["Transport": "RTP/AVP/TCP;unicast;interleaved=\(ch)-\(ch + 1)"]) { [self] result in
             switch result {
             case .success(let r):
                 if let s = r.headers["session"] { session = s.components(separatedBy: ";").first?.trimmingCharacters(in: .whitespaces) }
-                channels[ch] = media
-                next()
+                if let media { channels[ch] = media }
+                next(true)
             case .failure:
-                optional ? next() : fail(result)
+                optional ? next(false) : fail(result)
             }
         }
     }
@@ -130,7 +150,24 @@ final class RTSPClient {
             }
             t.resume()
             keepAlive = t
+            onPlaying?(backchannelLaw)
         }
+    }
+
+    /// Sends one 20 ms G.711 frame to the camera. Without a return channel, does nothing.
+    func sendAudio(_ frame: Data) {
+        queue.async { [self] in
+            guard !finished, let connection, var packetizer = backchannel else { return }
+            let packet = packetizer.packet(frame)
+            backchannel = packetizer
+            connection.send(content: RTPPacketizer.interleave(packet, channel: Self.backchannelChannel),
+                            completion: .contentProcessed { _ in })
+        }
+    }
+
+    /// Marks the end of a sentence, so the next frame starts a new talkspurt.
+    func endTalkspurt() {
+        queue.async { [self] in backchannel?.endTalkspurt() }
     }
 
     private func fail(_ result: Result<Response, Error>) {
@@ -245,6 +282,13 @@ final class RTSPClient {
         var kind: String
         var codec = ""
         var control = ""
+        var direction = ""
+
+        /// The bridge describes the talkback channel as a send-only audio track whose
+        /// control ends in /backchannel (aventproxy pkg/rtsp/protocol.go).
+        var isBackchannel: Bool {
+            kind == "audio" && (direction == "sendonly" || control.hasSuffix("/backchannel") || control == "backchannel")
+        }
     }
 
     static func parseSDP(_ sdp: String) -> [MediaDescription] {
@@ -259,6 +303,8 @@ final class RTSPClient {
                 if parts.count > 1 { out[out.count - 1].codec = String(parts[1]) }
             } else if line.hasPrefix("a=control:"), !out.isEmpty {
                 out[out.count - 1].control = String(line.dropFirst("a=control:".count))
+            } else if ["a=sendonly", "a=recvonly", "a=sendrecv", "a=inactive"].contains(line), !out.isEmpty {
+                out[out.count - 1].direction = String(line.dropFirst(2))
             }
         }
         return out

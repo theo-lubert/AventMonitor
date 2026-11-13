@@ -23,6 +23,8 @@ struct Camera: Codable, Identifiable, Hashable {
 
 struct BridgeInfo: Codable, Equatable {
     let port: Int
+    /// Whether streams offer a return audio channel, to talk through the camera.
+    let talkback: Bool
     let cameras: [BridgeCamera]
 }
 
@@ -57,6 +59,7 @@ struct StartBridgeParams: Encodable {
     let session: Session
     let cameras: [Camera]
     let port: Int
+    let talkback: Bool
 }
 
 /// Country codes offered at login. The data center follows the account's region.

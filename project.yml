@@ -34,6 +34,7 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         LSMinimumSystemVersion: "15.0"
         NSHumanReadableCopyright: "Built on aventproxy (MIT). Not affiliated with Philips or Tuya."
+        NSMicrophoneUsageDescription: "Baby Monitor utilise le micro uniquement quand vous maintenez le bouton Parler, pour que votre voix sorte de la caméra."
         NSLocalNetworkUsageDescription: "Baby Monitor peut joindre votre caméra directement sur le réseau local pour un flux plus rapide."
     settings:
       base:
@@ -73,6 +74,10 @@ targets:
       - Sources/Stream/AudioOutput.swift
       - Sources/Stream/SoundMeter.swift
       - Sources/Stream/MotionDetector.swift
+      - Sources/Stream/Talkback.swift
+      - Sources/Core/Models.swift
+      - Sources/Core/RoomState.swift
+      - Sources/App/RoomControls.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: fr.teos.AventMonitorTests

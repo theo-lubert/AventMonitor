@@ -21,6 +21,12 @@ to install or run.
 - Sound and motion detection, shown on the video, on the menu bar icon and on the Dock icon
   for a minute after each event.
 - A thumbnail of each camera in the menu bar panel, without keeping a stream open.
+- Night light (on/off, brightness, auto-off timer) and the monitor's 15 lullabies and soothing
+  sounds (play/pause, track, volume, repeat mode, stop timer), from the camera window or straight
+  from the menu bar panel. The room temperature shows on the video and on the thumbnail.
+- Talk through the camera: hold the mic button or the space bar. The bridge only opens the
+  return audio channel while talk mode is on (it ends after 3 minutes of silence), because the
+  monitor pauses a playing lullaby while that channel is open.
 - Optional Dock icon, menu bar icon and launch at login.
 
 ## How it works
