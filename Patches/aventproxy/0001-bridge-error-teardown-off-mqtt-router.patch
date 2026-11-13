@@ -1,0 +1,148 @@
+Bridge: tear a failed stream down off paho's MQTT router goroutine.
+
+The camera's MQTT "disconnect" (and MQTT-side errors) reach WebRTCBridge.handleError
+on paho's router goroutine. OnError then stops the stream, which publishes our own
+disconnect with QoS 1 and waits for the ack, which that same goroutine must deliver:
+the stream deadlocks with CameraStream.mutex held, and every later RTSP client hangs.
+OnError now runs on its own goroutine, ignores errors from an already replaced
+bridge, and MQTTClient.cameras gets a lock (read by the router, written on teardown).
+
+Applied by Scripts/build-core.sh to a copy of Vendor/aventproxy/avent-webrtc-bridge.
+
+diff --git a/pkg/rtsp/bridge.go b/pkg/rtsp/bridge.go
+index 41028b7..8fee48b 100644
+--- a/pkg/rtsp/bridge.go
++++ b/pkg/rtsp/bridge.go
+@@ -720,9 +720,14 @@ func (wb *WebRTCBridge) sendMessageToDataChannel(message []byte) error {
+ 	return nil
+ }
+ 
++// handleError runs OnError on its own goroutine. Errors and the camera's disconnect
++// arrive on paho's MQTT router goroutine, and OnError tears the stream down, which
++// publishes a disconnect and waits for its QoS 1 ack: an ack that router goroutine
++// would have to deliver. Called inline, the stream deadlocked with its mutex held and
++// every later RTSP client hung behind it.
+ func (wb *WebRTCBridge) handleError(err error) {
+-	if wb.OnError != nil {
++	if onError := wb.OnError; onError != nil {
+ 		wb.waiter.Done(err)
+-		wb.OnError(err)
++		go onError(err)
+ 	}
+ }
+diff --git a/pkg/rtsp/server.go b/pkg/rtsp/server.go
+index 0ed9e4d..f71d373 100644
+--- a/pkg/rtsp/server.go
++++ b/pkg/rtsp/server.go
+@@ -745,15 +745,29 @@ func (cs *CameraStream) attachBridgeErrorHandler() {
+ 	if cs.webrtcBridge == nil {
+ 		return
+ 	}
+-	cs.webrtcBridge.OnError = func(err error) {
+-		cs.handleBridgeError(err)
++	bridge := cs.webrtcBridge
++	bridge.OnError = func(err error) {
++		cs.handleBridgeErrorFrom(bridge, err)
+ 	}
+ }
+ 
+ // handleBridgeError tears down a failed WebRTC session and force-closes RTSP clients
+ // so they reconnect against a fresh stream (required for persistent clients like Scrypted).
+ func (cs *CameraStream) handleBridgeError(err error) {
++	cs.handleBridgeErrorFrom(nil, err)
++}
++
++// handleBridgeErrorFrom is handleBridgeError for an error raised by bridge. OnError
++// runs asynchronously, so by the time it does the stream may already have moved on
++// to a new bridge: an error from an older one is ignored rather than tearing down
++// the new session.
++func (cs *CameraStream) handleBridgeErrorFrom(bridge *WebRTCBridge, err error) {
+ 	cs.mutex.Lock()
++	if bridge != nil && cs.webrtcBridge != bridge {
++		cs.mutex.Unlock()
++		core.Logger.Debug().Err(err).Msgf("Ignoring error from a replaced WebRTC bridge for camera %s", cs.camera.DeviceName)
++		return
++	}
+ 	if cs.handlingError || (!cs.active && !cs.connecting) {
+ 		cs.mutex.Unlock()
+ 		return
+diff --git a/pkg/rtsp/stream_error_test.go b/pkg/rtsp/stream_error_test.go
+index 0ef0c1b..6f9ab21 100644
+--- a/pkg/rtsp/stream_error_test.go
++++ b/pkg/rtsp/stream_error_test.go
+@@ -278,3 +278,27 @@ func TestSDPAdvertisesBackchannelOnlyWithTalkback(t *testing.T) {
+ 		t.Error("talkback on: the return channel must be marked sendonly")
+ 	}
+ }
++
++// OnError runs asynchronously, so it can land after the stream switched to a new
++// bridge. An error from the replaced bridge must not tear down the new session.
++func TestBridgeErrorFromReplacedBridgeIsIgnored(t *testing.T) {
++	_, stream := newTestCameraStream(t)
++	stream.active = true
++
++	old := NewWebRTCBridge(stream.camera, "hd", stream.user, nil)
++	stream.webrtcBridge = old
++	stream.attachBridgeErrorHandler()
++	staleOnError := old.OnError
++
++	stream.webrtcBridge = NewWebRTCBridge(stream.camera, "hd", stream.user, nil)
++	stream.attachBridgeErrorHandler()
++
++	staleOnError(errors.New("camera client disconnected"))
++
++	stream.mutex.RLock()
++	active := stream.active
++	stream.mutex.RUnlock()
++	if !active {
++		t.Fatal("an error from a replaced bridge stopped the current stream")
++	}
++}
+diff --git a/pkg/tuya/mqtt.go b/pkg/tuya/mqtt.go
+index 8cfb17f..041100d 100644
+--- a/pkg/tuya/mqtt.go
++++ b/pkg/tuya/mqtt.go
+@@ -7,6 +7,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"sync"
+ 	"time"
+ 
+ 	mqtt "github.com/eclipse/paho.mqtt.golang"
+@@ -16,6 +17,7 @@ type MQTTClient struct {
+ 	mqtt           mqtt.Client
+ 	uid            string
+ 	subscribeTopic string
++	camerasMu      sync.RWMutex                 // cameras is read by paho's router goroutine, written by stream setup/teardown
+ 	cameras        map[string]*MQTTCameraClient // sessionId -> camera
+ 	closed         bool
+ 	Connected      utils.Waiter
+@@ -127,6 +129,8 @@ func (c *MQTTClient) IsConnected() bool {
+ }
+ 
+ func (c *MQTTClient) AddCameraClient(sessionId string, cameraClient *MQTTCameraClient) {
++	c.camerasMu.Lock()
++	defer c.camerasMu.Unlock()
+ 	if c.cameras == nil {
+ 		c.cameras = make(map[string]*MQTTCameraClient)
+ 	}
+@@ -134,6 +138,8 @@ func (c *MQTTClient) AddCameraClient(sessionId string, cameraClient *MQTTCameraC
+ }
+ 
+ func (c *MQTTClient) RemoveCameraClient(sessionId string) {
++	c.camerasMu.Lock()
++	defer c.camerasMu.Unlock()
+ 	if c.cameras == nil {
+ 		return
+ 	}
+@@ -171,7 +177,9 @@ func (c *MQTTClient) consume(client mqtt.Client, msg mqtt.Message) {
+ 	}
+ 
+ 	sessionId := rmqtt.Data.Header.SessionID
++	c.camerasMu.RLock()
+ 	cameraClient, ok := c.cameras[sessionId]
++	c.camerasMu.RUnlock()
+ 	if !ok {
+ 		core.Logger.Warn().Msgf("No camera client found for sessionId: %s", sessionId)
+ 		return

@@ -27,7 +27,15 @@ final class CameraStream: NSObject, ObservableObject {
 
     let cameraID: String
     @Published var name: String
-    @Published private(set) var status: Status = .idle
+    @Published private(set) var status: Status = .idle {
+        didSet {
+            guard status != oldValue else { return }
+            videoLog.notice("\(self.name, privacy: .public): \(self.status.label, privacy: .public)")
+            // Down while running: keep the last picture on screen, dimmed, with a loader in PiP.
+            let interrupted = running && status != .live
+            onPipeline { $0.interrupted = interrupted }
+        }
+    }
     @Published private(set) var videoSize = CGSize(width: 16, height: 9) {
         didSet { if videoSize != oldValue { applyAspectRatio() } }
     }
@@ -35,7 +43,7 @@ final class CameraStream: NSObject, ObservableObject {
         didSet {
             // PiP shows only the video layer, so the sound bars go into the picture itself.
             let active = pipActive
-            onPipeline { $0.drawsSoundBars = active }
+            onPipeline { $0.drawsOverlays = active }
         }
     }
     @Published private(set) var pipPossible = false
@@ -77,8 +85,8 @@ final class CameraStream: NSObject, ObservableObject {
     private var restoringFromPiP = false
     private var running = false
     private var client: RTSPClient?
-    private let pipeline = MediaPipeline()
-    private let ioQueue = DispatchQueue(label: "camera.stream.io", qos: .userInteractive)
+    private let pipeline: MediaPipeline
+    private let ioQueue: DispatchQueue
     private var pip: AVPictureInPictureController?
     private var possibleObservation: NSKeyValueObservation?
     private var watchdog: Timer?
@@ -90,6 +98,9 @@ final class CameraStream: NSObject, ObservableObject {
     init(cameraID: String, name: String) {
         self.cameraID = cameraID
         self.name = name
+        let queue = DispatchQueue(label: "camera.stream.io", qos: .userInteractive)
+        ioQueue = queue
+        pipeline = MediaPipeline(queue: queue)
         super.init()
         layer.videoGravity = .resizeAspect
         layer.backgroundColor = NSColor.black.cgColor
@@ -115,19 +126,13 @@ final class CameraStream: NSObject, ObservableObject {
 
     /// A renderer that failed, or that needs a flush to resume (after a display or GPU
     /// change, or the screen locking), keeps its last image or goes black while we keep
-    /// enqueuing frames. A live stream never needs a backlog, so one that stopped
-    /// draining is flushed too. Runs on the I/O queue before each frame.
+    /// enqueuing frames. Runs on the I/O queue before each frame.
     private nonisolated static func recoverIfStalled(_ renderer: AVSampleBufferVideoRenderer) {
         let reason: String
         if renderer.status == .failed {
             reason = "failed: \(renderer.error?.localizedDescription ?? "unknown error")"
         } else if renderer.requiresFlushToResumeDecoding {
             reason = "requires flush to resume decoding"
-        } else if !renderer.isReadyForMoreMediaData {
-            // Also happens while the window is minimized, so not worth persisting.
-            videoLog.debug("Flushing video renderer: not ready for more data")
-            renderer.flush()
-            return
         } else {
             return
         }
@@ -202,8 +207,6 @@ final class CameraStream: NSObject, ObservableObject {
         status = .connecting
         connectStarted = Date()
         onPipeline { $0.reset() }
-        // A new connection restarts timestamps at zero: drop anything queued on the old timeline.
-        layer.sampleBufferRenderer.flush()
         soundLevel = nil
 
         let c = RTSPClient(url: url, queue: ioQueue)
@@ -218,6 +221,7 @@ final class CameraStream: NSObject, ObservableObject {
 
     private func connectionClosed(_ error: Error?) {
         guard running else { return }
+        videoLog.notice("\(self.name, privacy: .public): connection closed: \(error?.localizedDescription ?? "no error", privacy: .public)")
         client = nil
         status = .failed(error?.localizedDescription ?? "Flux interrompu")
         scheduleRetry()
@@ -236,6 +240,7 @@ final class CameraStream: NSObject, ObservableObject {
         status = .live
         retryDelay = 1
         startPiPIfWanted()
+        refreshPiPLayout()
     }
 
     /// Reconnects a stream that stopped delivering frames.
@@ -343,6 +348,18 @@ final class CameraStream: NSObject, ObservableObject {
         layer.frame = content.bounds
         CATransaction.commit()
         trackWindowSize(in: content)
+    }
+
+    /// After a reconnect PiP has been seen drawing the video off to the side of its window.
+    /// Changing the layer's size makes AVKit lay the video out again, as a PiP resize does;
+    /// fitLayerToPiP then puts the size back.
+    private func refreshPiPLayout() {
+        guard pipActive else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.frame = layer.frame.insetBy(dx: 1, dy: 1)
+        CATransaction.commit()
+        DispatchQueue.main.async { self.fitLayerToPiP() }
     }
 
     private func trackWindowSize(in content: NSView) {

@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Sound and movement seen on each camera, kept for a minute after the last detection.
-/// Feeds the badges on the video, the Dock icon and the menu bar icon.
+/// Sound and movement seen on each camera, kept for a minute after the last detection,
+/// and the cameras whose stream was lost. Feeds the badges on the video, the Dock icon
+/// and the menu bar icon.
 @MainActor
 final class ActivityCenter: ObservableObject {
     enum Kind: CaseIterable {
@@ -34,6 +35,23 @@ final class ActivityCenter: ObservableObject {
 
     /// Last detection per camera and kind, for the ones still active.
     @Published private(set) var last: [String: [Kind: Date]] = [:]
+    /// Cameras whose open stream dropped and is reconnecting.
+    @Published private(set) var disconnected: Set<String> = []
+
+    /// Colour of the badge dot for a lost stream, shown before the activity dots.
+    static let disconnectedColor = NSColor.systemRed
+
+    func setDisconnected(_ isDisconnected: Bool, camera: String) {
+        guard disconnected.contains(camera) != isDisconnected else { return }
+        if isDisconnected { disconnected.insert(camera) } else { disconnected.remove(camera) }
+    }
+
+    /// Dots for the Dock and menu bar icons: red for a lost stream, then one per activity kind.
+    nonisolated static func badgeColors(last: [String: [Kind: Date]], disconnected: Set<String>) -> [NSColor] {
+        (disconnected.isEmpty ? [] : [disconnectedColor]) + kinds(in: last).map(\.color)
+    }
+
+    var badgeColors: [NSColor] { Self.badgeColors(last: last, disconnected: disconnected) }
     private var expiry: Timer?
 
     func report(_ kind: Kind, camera: String) {
@@ -43,6 +61,7 @@ final class ActivityCenter: ObservableObject {
 
     func clearAll() {
         last = [:]
+        disconnected = []
         scheduleExpiry()
     }
 
@@ -78,31 +97,31 @@ final class ActivityCenter: ObservableObject {
 // MARK: - Icons with badges
 
 enum ActivityBadge {
-    /// Draws one dot per kind, stacked vertically from the top right of `rect`.
-    static func drawDots(_ kinds: [ActivityCenter.Kind], in rect: NSRect, diameter: CGFloat, ring: NSColor?) {
+    /// Draws one dot per colour, stacked vertically from the top right of `rect`.
+    static func drawDots(_ colors: [NSColor], in rect: NSRect, diameter: CGFloat, ring: NSColor?) {
         let gap = diameter * 0.25
         var y = rect.maxY - diameter
-        for kind in kinds {
+        for color in colors {
             let dot = NSRect(x: rect.maxX - diameter, y: y, width: diameter, height: diameter)
             if let ring {
                 ring.setFill()
                 NSBezierPath(ovalIn: dot.insetBy(dx: -diameter * 0.12, dy: -diameter * 0.12)).fill()
             }
-            kind.color.setFill()
+            color.setFill()
             NSBezierPath(ovalIn: dot).fill()
             y -= diameter + gap
         }
     }
 
-    /// The menu bar icon, plus coloured dots when something was detected.
+    /// The menu bar icon, plus coloured dots for a lost stream or a detection.
     /// Coloured dots need a non-template image, so the icon itself is drawn in the menu bar's text colour.
-    static func menuBarImage(_ kinds: [ActivityCenter.Kind]) -> NSImage {
+    static func menuBarImage(_ colors: [NSColor]) -> NSImage {
         guard let base = NSImage(named: "MenuBarIcon") else { return NSImage() }
-        guard !kinds.isEmpty else { return base }
+        guard !colors.isEmpty else { return base }
         let dot: CGFloat = 6
         let gap = dot * 0.25
         let extra = dot + 1.5
-        let stack = CGFloat(kinds.count) * dot + CGFloat(kinds.count - 1) * gap
+        let stack = CGFloat(colors.count) * dot + CGFloat(colors.count - 1) * gap
         let size = NSSize(width: base.size.width + extra, height: base.size.height)
         let image = NSImage(size: size, flipped: false) { rect in
             let iconRect = NSRect(origin: .zero, size: base.size)
@@ -110,7 +129,7 @@ enum ActivityBadge {
             NSColor.labelColor.set()
             iconRect.fill(using: .sourceAtop)
             // Centred vertically next to the icon.
-            drawDots(kinds, in: NSRect(x: base.size.width, y: (rect.height - stack) / 2, width: extra, height: stack),
+            drawDots(colors, in: NSRect(x: base.size.width, y: (rect.height - stack) / 2, width: extra, height: stack),
                      diameter: dot, ring: nil)
             return true
         }
@@ -118,16 +137,16 @@ enum ActivityBadge {
         return image
     }
 
-    /// Updates the Dock icon: the app icon, with dots at the top right when something was detected.
-    static func updateDock(_ kinds: [ActivityCenter.Kind]) {
+    /// Updates the Dock icon: the app icon, with dots at the top right for a lost stream or a detection.
+    static func updateDock(_ colors: [NSColor]) {
         let tile = NSApp.dockTile
-        if kinds.isEmpty {
+        if colors.isEmpty {
             tile.contentView = nil
         } else {
             let icon = NSApp.applicationIconImage ?? NSImage()
             let image = NSImage(size: NSSize(width: 128, height: 128), flipped: false) { rect in
                 icon.draw(in: rect)
-                drawDots(kinds, in: rect.insetBy(dx: 8, dy: 8), diameter: 34, ring: .white)
+                drawDots(colors, in: rect.insetBy(dx: 8, dy: 8), diameter: 34, ring: .white)
                 return true
             }
             let view = NSImageView(image: image)

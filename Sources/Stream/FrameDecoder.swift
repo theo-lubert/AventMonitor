@@ -38,11 +38,10 @@ final class FrameDecoder: @unchecked Sendable { // confined to the stream queue
             }
         }
         guard let session else { return }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) {
             [weak self] status, _, image, _, _ in
             guard status == noErr, let image else { return }
-            self?.decoded(image, pts: pts)
+            self?.decoded(image)
         }
         // Keep frames in order and on this queue's timeline.
         VTDecompressionSessionWaitForAsynchronousFrames(session)
@@ -81,25 +80,32 @@ final class FrameDecoder: @unchecked Sendable { // confined to the stream queue
         return true
     }
 
-    private func decoded(_ image: CVImageBuffer, pts: CMTime) {
+    private func decoded(_ image: CVImageBuffer) {
         onImage?(image)
         if drawsSoundBars, let level = soundLevel { SoundBarsPainter.draw(level: level, on: image) }
-        guard let sample = wrap(image, pts: pts) else { return }
+        guard let sample = DisplaySample.make(image, format: &outputFormat) else { return }
         onSample?(sample)
     }
+}
 
-    private func wrap(_ image: CVImageBuffer, pts: CMTime) -> CMSampleBuffer? {
-        if outputFormat.map({ CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: image) }) != true {
+/// Wraps decoded images for the display layer.
+enum DisplaySample {
+    /// A sample shown as soon as it is enqueued. Stamped with the host clock rather than
+    /// the camera's: a reconnect restarts the camera's clock at zero, and Picture in Picture
+    /// stops following a layer whose time jumps backwards.
+    static func make(_ image: CVImageBuffer, format: inout CMVideoFormatDescription?) -> CMSampleBuffer? {
+        if format.map({ CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: image) }) != true {
             var desc: CMVideoFormatDescription?
             guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image,
                                                                formatDescriptionOut: &desc) == noErr else { return nil }
-            outputFormat = desc
+            format = desc
         }
-        guard let outputFormat else { return nil }
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+        guard let format else { return nil }
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: now, decodeTimeStamp: .invalid)
         var sample: CMSampleBuffer?
         guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image,
-                                                       formatDescription: outputFormat, sampleTiming: &timing,
+                                                       formatDescription: format, sampleTiming: &timing,
                                                        sampleBufferOut: &sample) == noErr,
               let sample else { return nil }
         sample.setAttachment(kCMSampleAttachmentKey_DisplayImmediately)

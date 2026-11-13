@@ -37,4 +37,4 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 )
 
-replace avent-webrtc-bridge => ../Vendor/aventproxy/avent-webrtc-bridge
+replace avent-webrtc-bridge => ../Build/aventproxy-bridge // patched copy, made by Scripts/build-core.sh

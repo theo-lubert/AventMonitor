@@ -1,5 +1,6 @@
 import CoreGraphics
 import CoreMedia
+import CoreVideo
 import Foundation
 
 /// Everything that happens to a stream's packets, from RTP to the display layer:
@@ -7,6 +8,7 @@ import Foundation
 ///     video RTP → H264Assembler → FrameDecoder → display
 ///                                      ├→ MotionDetector
 ///                                      └→ ThumbnailSampler
+///     stream down → OutagePlaceholder (last picture, dimmed, with a loader) → display
 ///     audio RTP → AudioOutput (speaker) and SoundMeter (level)
 ///
 /// Confined to the stream's I/O queue: call every method there. Callbacks also
@@ -31,9 +33,13 @@ final class MediaPipeline: @unchecked Sendable {
     private let audio = AudioOutput()
     private let meter = SoundMeter()
     private let clock = FrameClock()
+    private let placeholder: OutagePlaceholder
     private var lastActivity: [ActivityCenter.Kind: Date] = [:]
+    /// The last decoded picture shown, the background while the stream is down.
+    private var lastPicture: CVPixelBuffer?
 
-    init() {
+    init(queue: DispatchQueue) {
+        placeholder = OutagePlaceholder(queue: queue)
         assembler.onDimensions = { [unowned self] in onDimensions?($0) }
         assembler.onSample = { [unowned self] sample in
             decoder.push(sample)
@@ -45,7 +51,13 @@ final class MediaPipeline: @unchecked Sendable {
             motion.analyze(image)
             thumbnails.push(image)
         }
-        decoder.onSample = { [unowned self] in onDisplay?($0) }
+        decoder.onSample = { [unowned self] sample in
+            if let picture = CMSampleBufferGetImageBuffer(sample) { lastPicture = picture }
+            // Video is back: real frames replace the placeholder at once.
+            if interrupted { interrupted = false }
+            onDisplay?(sample)
+        }
+        placeholder.onSample = { [unowned self] in onDisplay?($0) }
         motion.onMotion = { [unowned self] in report(.motion) }
         meter.onLoud = { [unowned self] in report(.sound) }
         meter.onLevel = { [unowned self] level in
@@ -58,10 +70,27 @@ final class MediaPipeline: @unchecked Sendable {
     /// Seconds since the last video frame (or the last reset). Safe from any thread.
     var secondsSinceLastFrame: TimeInterval { clock.secondsSinceLastFrame }
 
-    /// Draws the sound level into the picture, for Picture in Picture where overlays are not shown.
-    var drawsSoundBars: Bool {
+    /// Draws the sound level and the reconnection loader into the picture, for Picture
+    /// in Picture where the window's overlays are not shown.
+    var drawsOverlays: Bool {
         get { decoder.drawsSoundBars }
-        set { decoder.drawsSoundBars = newValue }
+        set {
+            decoder.drawsSoundBars = newValue
+            placeholder.drawsLoader = newValue
+        }
+    }
+
+    /// The stream is down: show the last picture, dimmed, until video comes back.
+    /// Cleared by the first new frame.
+    var interrupted = false {
+        didSet {
+            guard interrupted != oldValue else { return }
+            if interrupted, let lastPicture {
+                placeholder.start(from: lastPicture)
+            } else {
+                placeholder.stop()
+            }
+        }
     }
 
     var muted: Bool {
@@ -91,9 +120,11 @@ final class MediaPipeline: @unchecked Sendable {
         clock.reset()
     }
 
-    /// Resets and releases the audio device.
+    /// Resets, and releases the audio device and the last picture.
     func stop() {
         reset()
+        interrupted = false
+        lastPicture = nil
         audio.stop()
     }
 

@@ -41,6 +41,7 @@ camera ──WebRTC──▶ aventproxy bridge ──RTSP on 127.0.0.1──▶ 
 | `Sources/Stream/` | A minimal RTSP client, RTP/H.264 depacketisation, decoding, audio, motion and sound detection. |
 | `Sources/App/`, `Sources/UI/` | The app model and the SwiftUI/AppKit interface. |
 | `Vendor/aventproxy/` | aventproxy, as a git submodule. |
+| `Patches/aventproxy/` | Fixes to aventproxy's bridge not yet upstream. `Scripts/build-core.sh` applies them to a copy in `Build/aventproxy-bridge`, which `Core/go.mod` builds against, so the submodule stays untouched. |
 
 ## Building
 

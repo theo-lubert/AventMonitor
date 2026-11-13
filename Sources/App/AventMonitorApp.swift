@@ -41,16 +41,17 @@ struct AventMonitorApp: App {
     }
 }
 
-/// The menu bar icon, with a coloured dot per kind of activity detected in the last minute.
+/// The menu bar icon, with a red dot while a stream is lost and a coloured dot per kind
+/// of activity detected in the last minute.
 private struct MenuBarLabel: View {
     @ObservedObject var activity: ActivityCenter
 
     var body: some View {
-        let kinds = activity.activeKinds
-        if kinds.isEmpty {
+        let colors = activity.badgeColors
+        if colors.isEmpty {
             Image("MenuBarIcon")
         } else {
-            Image(nsImage: ActivityBadge.menuBarImage(kinds))
+            Image(nsImage: ActivityBadge.menuBarImage(colors))
         }
     }
 }

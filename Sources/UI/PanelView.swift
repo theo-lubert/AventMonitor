@@ -152,7 +152,7 @@ private struct CameraList: View {
                     .padding(6)
             }
             ForEach(model.cameras) { cam in
-                CameraTile(camera: cam, thumbnails: model.thumbnails, open: open)
+                CameraTile(camera: cam, thumbnails: model.thumbnails, activity: model.activity, open: open)
             }
             .disabled(model.bridge == nil)
             if let error = model.errorMessage {
@@ -169,6 +169,7 @@ private struct CameraList: View {
 private struct CameraTile: View {
     let camera: Camera
     @ObservedObject var thumbnails: ThumbnailStore
+    @ObservedObject var activity: ActivityCenter
     let open: (String, Bool) -> Void
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
@@ -190,6 +191,8 @@ private struct CameraTile: View {
                     HStack {
                         if thumbnails.live.contains(camera.id) {
                             liveBadge
+                        } else if activity.disconnected.contains(camera.id) {
+                            reconnectingBadge
                         } else if let thumbnail {
                             age(of: thumbnail.date)
                         }
@@ -262,6 +265,18 @@ private struct CameraTile: View {
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(Color.red.opacity(0.85), in: Capsule())
+    }
+
+    /// The stream was lost and is reconnecting.
+    private var reconnectingBadge: some View {
+        HStack(spacing: 4) {
+            Circle().fill(Color(nsColor: ActivityCenter.disconnectedColor)).frame(width: 6, height: 6)
+            Text("Reconnexion…")
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(.black.opacity(0.55), in: Capsule())
     }
 
     /// How old the still is, so it is never mistaken for live video.

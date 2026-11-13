@@ -72,7 +72,8 @@ final class AppModel: ObservableObject {
         showDockIcon = UserDefaults.standard.bool(forKey: DefaultsKey.dock)
         showMenuBarIcon = UserDefaults.standard.bool(forKey: DefaultsKey.menuBar)
         activityObserver = activity.$last
-            .map(ActivityCenter.kinds(in:))
+            .combineLatest(activity.$disconnected)
+            .map(ActivityCenter.badgeColors(last:disconnected:))
             .removeDuplicates()
             .sink { ActivityBadge.updateDock($0) }
     }
@@ -244,10 +245,17 @@ final class AppModel: ObservableObject {
         s.onPiPDismissed = { [weak self] in self?.closeWindow(cameraID) }
         s.onActivity = { [weak self] kind in self?.activity.report(kind, camera: cameraID) }
         s.onThumbnail = { [weak self] image in self?.thumbnails.store(image, for: cameraID) }
+        // Lost: was live, then dropped while still open. Stopping goes to .idle, which is not lost.
+        var wasLive = false
         liveObservers[cameraID] = s.$status
-            .map { $0 == .live }
             .removeDuplicates()
-            .sink { [weak self] isLive in self?.thumbnails.setLive(isLive, for: cameraID) }
+            .sink { [weak self] status in
+                guard let self else { return }
+                if status == .live { wasLive = true }
+                if status == .idle { wasLive = false }
+                thumbnails.setLive(status == .live, for: cameraID)
+                activity.setDisconnected(wasLive && status != .live, camera: cameraID)
+            }
         streams[cameraID] = s
         return s
     }
@@ -260,6 +268,7 @@ final class AppModel: ObservableObject {
         streams[cameraID] = nil
         liveObservers[cameraID] = nil
         thumbnails.setLive(false, for: cameraID)
+        activity.setDisconnected(false, camera: cameraID)
     }
 
     private func closeWindow(_ cameraID: String) {

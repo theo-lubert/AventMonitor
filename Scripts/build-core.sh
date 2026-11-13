@@ -14,6 +14,17 @@ if [ ! -f "$VENDOR/avent-webrtc-bridge/go.mod" ]; then
   exit 1
 fi
 
+# Core builds against a patched copy of the bridge (Core/go.mod points there), so the
+# submodule stays pristine. Patches live in Patches/aventproxy, applied in order.
+BRIDGE="$ROOT/Build/aventproxy-bridge"
+rm -rf "$BRIDGE"
+mkdir -p "$BRIDGE"
+cp -R "$VENDOR/avent-webrtc-bridge/." "$BRIDGE/"
+for patch in "$ROOT"/Patches/aventproxy/*.patch; do
+  [ -e "$patch" ] || continue
+  patch -p1 -s -N -d "$BRIDGE" < "$patch"
+done
+
 python3 -I "$ROOT/Scripts/gen-keys.py" \
   "$VENDOR/custom_components/philips_avent/const.py" "$ROOT/Core/keys_gen.go"
 

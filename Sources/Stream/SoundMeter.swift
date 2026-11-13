@@ -4,13 +4,16 @@ import Foundation
 /// Works whether or not playback is muted.
 final class SoundMeter: @unchecked Sendable { // confined to the stream queue
     /// dBFS thresholds for levels 1, 2 and 3.
-    static let thresholds: [Float] = [-45, -35, -25]
+    static let thresholds: [Float] = [-32, -22, -12]
 
     /// Called on the stream queue whenever the level changes.
     var onLevel: ((Int) -> Void)?
     /// Called on the stream queue for every 100 ms window at level 2 or more.
     var onLoud: (() -> Void)?
     static let loudLevel = 2
+    /// Consecutive loud windows (100 ms each) before it counts as sound, so clicks and bumps are ignored.
+    static let loudWindowsNeeded = 5
+    private var loudWindows = 0
 
     private let windowFrames = 800 // 100 ms at 8 kHz
     private let releaseWindows = 5 // hold a level 500 ms before dropping
@@ -34,6 +37,7 @@ final class SoundMeter: @unchecked Sendable { // confined to the stream queue
         sumSquares = 0
         frames = 0
         level = -1
+        loudWindows = 0
         heldWindows = 0
     }
 
@@ -43,7 +47,8 @@ final class SoundMeter: @unchecked Sendable { // confined to the stream queue
         frames = 0
         let db = 20 * log10(max(rms, 1e-6))
         let measured = Self.thresholds.filter { db >= $0 }.count
-        if measured >= Self.loudLevel { onLoud?() }
+        loudWindows = measured >= Self.loudLevel ? loudWindows + 1 : 0
+        if loudWindows >= Self.loudWindowsNeeded { onLoud?() }
 
         // Fast attack, slow release, so short sounds stay readable.
         if measured >= level {
