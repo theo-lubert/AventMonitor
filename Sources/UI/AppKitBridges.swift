@@ -18,10 +18,8 @@ struct VideoLayerView: NSViewRepresentable {
         if view.hosted !== layer { view.hosted = layer }
         let wasInPiP = view.pipActive
         view.pipActive = pipActive
-        if wasInPiP && !pipActive {
-            view.reclaim()
-            view.needsLayout = true
-        }
+        if wasInPiP && !pipActive { view.reclaim() }
+        if wasInPiP != pipActive { view.needsLayout = true }
     }
 
     final class LayerHostView: NSView {
@@ -31,6 +29,7 @@ struct VideoLayerView: NSViewRepresentable {
             didSet {
                 oldValue?.removeFromSuperlayer()
                 if let hosted { layer?.addSublayer(hosted) }
+                observeHosted()
                 applyScale()
                 needsLayout = true
             }
@@ -68,13 +67,43 @@ struct VideoLayerView: NSViewRepresentable {
 
         override func layout() {
             super.layout()
-            // Never resize the layer while it lives in the PiP window: our bounds
-            // would offset and crop the picture there.
-            guard !pipActive, let hosted, hosted.superlayer === layer else { return }
+            guard let hosted, let layer, hosted.superlayer === layer else { return }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            hosted.frame = bounds
-            CATransaction.commit()
+            defer { CATransaction.commit() }
+            if pipActive {
+                // Never resize the display layer while PiP runs: it is kept at the
+                // PiP window's size. AVKit's "playing in picture in picture"
+                // placeholder is a sublayer of it, so it would sit at that size in
+                // the window's corner; stretch it over the whole view instead.
+                let target = hosted.convert(bounds, from: layer)
+                for sub in hosted.sublayers ?? [] where Self.isPiPIndicator(sub) && sub.frame != target {
+                    sub.frame = target
+                }
+            } else {
+                hosted.frame = bounds
+            }
+        }
+
+        private static func isPiPIndicator(_ layer: CALayer) -> Bool {
+            String(describing: type(of: layer)).contains("PictureInPictureIndicator")
+        }
+
+        /// The display layer is resized to the PiP window and gets the placeholder
+        /// added while PiP runs; both need the placeholder fitted again.
+        private var hostedObservations: [NSKeyValueObservation] = []
+
+        private func observeHosted() {
+            hostedObservations = []
+            guard let hosted else { return }
+            hostedObservations = [
+                hosted.observe(\.bounds) { [weak self] _, _ in self?.relayoutOnMain() },
+                hosted.observe(\.sublayers) { [weak self] _, _ in self?.relayoutOnMain() },
+            ]
+        }
+
+        private func relayoutOnMain() {
+            DispatchQueue.main.async { [weak self] in self?.needsLayout = true }
         }
 
         override var mouseDownCanMoveWindow: Bool { true }
