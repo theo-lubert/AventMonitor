@@ -108,3 +108,68 @@ func TestStr(t *testing.T) {
 		t.Errorf("str = %q, want the first non-empty string", got)
 	}
 }
+
+// fakeAPI answers every call with result and records the last request's form.
+func fakeAPI(t *testing.T, result string) (*httptest.Server, *url.Values) {
+	t.Helper()
+	var form url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		form = r.PostForm
+		w.Write([]byte(`{"success":true,"result":` + result + `}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &form
+}
+
+func TestSetDPSPublishesToTheDevice(t *testing.T) {
+	srv, form := fakeAPI(t, `true`)
+	s := Session{SID: "sid", DeviceID: "phone"}
+	c := s.client()
+	c.baseURL = srv.URL
+	dps := map[string]json.RawMessage{"138": json.RawMessage(`true`), "158": json.RawMessage(`30`)}
+	if _, err := publishDPS(c, "cam", dps); err != nil {
+		t.Fatal(err)
+	}
+	if got := form.Get("a"); got != "tuya.m.device.dp.publish" {
+		t.Errorf("action = %q", got)
+	}
+	var post struct {
+		DevID string         `json:"devId"`
+		GwID  string         `json:"gwId"`
+		DPS   map[string]any `json:"dps"`
+	}
+	if err := json.Unmarshal([]byte(form.Get("postData")), &post); err != nil {
+		t.Fatal(err)
+	}
+	if post.DevID != "cam" || post.GwID != "cam" || post.DPS["138"] != true || post.DPS["158"] != float64(30) {
+		t.Errorf("postData = %s", form.Get("postData"))
+	}
+}
+
+func TestSetDPSRejectsEmptyCommands(t *testing.T) {
+	if _, err := setDPS(setDPSParams{ID: "cam"}); err == nil {
+		t.Error("expected an error without data points")
+	}
+	if _, err := setDPS(setDPSParams{DPS: map[string]json.RawMessage{"138": json.RawMessage(`true`)}}); err == nil {
+		t.Error("expected an error without a device id")
+	}
+}
+
+func TestReadDeviceReturnsDataPoints(t *testing.T) {
+	srv, form := fakeAPI(t, `{"isOnline":true,"dps":{"138":false,"207":2150,"248":"{\"id\":3542155}"}}`)
+	c := (Session{SID: "sid"}).client()
+	c.baseURL = srv.URL
+	st, err := readDevice(c, "cam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("a") != "tuya.m.device.get" {
+		t.Errorf("action = %q, want a read", form.Get("a"))
+	}
+	if !st.Online || string(st.DPS["138"]) != "false" || string(st.DPS["207"]) != "2150" {
+		t.Errorf("state = %+v", st)
+	}
+}

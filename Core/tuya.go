@@ -54,6 +54,7 @@ type client struct {
 	host     string
 	sid      string
 	deviceID string
+	baseURL  string // tests only: replaces the https://<host>/api.json endpoint
 }
 
 func swap(s string) string {
@@ -110,7 +111,11 @@ func (c *client) call(action, version string, postData any, extra map[string]str
 	for k, v := range extra { // unsigned, as in the HA integration
 		form.Set(k, v)
 	}
-	req, err := http.NewRequest("POST", tuya.APIBaseURL(c.host), strings.NewReader(form.Encode()))
+	endpoint := c.baseURL
+	if endpoint == "" {
+		endpoint = tuya.APIBaseURL(c.host)
+	}
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -393,4 +398,67 @@ func str(vals ...any) string {
 		}
 	}
 	return ""
+}
+
+// Device data points (DPS): the night light, lullabies and temperature are all
+// read and written through them. See aventproxy's examples/DPS_REFERENCE.md.
+
+type deviceParams struct {
+	Session Session `json:"session"`
+	ID      string  `json:"id"`
+}
+
+type deviceState struct {
+	Online bool                       `json:"online"`
+	DPS    map[string]json.RawMessage `json:"dps"`
+}
+
+// deviceStateOf reads a camera's data points from the cloud. It only reads:
+// the camera itself is not contacted.
+func deviceStateOf(p deviceParams) (*deviceState, error) {
+	return readDevice(p.Session.client(), p.ID)
+}
+
+func readDevice(c *client, id string) (*deviceState, error) {
+	if id == "" {
+		return nil, fmt.Errorf("missing device id")
+	}
+	raw, err := c.call("tuya.m.device.get", "1.0", map[string]string{"devId": id}, nil)
+	if err != nil {
+		return nil, err
+	}
+	var d struct {
+		IsOnline bool                       `json:"isOnline"`
+		DPS      map[string]json.RawMessage `json:"dps"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return nil, err
+	}
+	if d.DPS == nil {
+		d.DPS = map[string]json.RawMessage{}
+	}
+	return &deviceState{Online: d.IsOnline, DPS: d.DPS}, nil
+}
+
+type setDPSParams struct {
+	Session Session                    `json:"session"`
+	ID      string                     `json:"id"`
+	DPS     map[string]json.RawMessage `json:"dps"`
+}
+
+// setDPS publishes data points to a camera through the cloud, as the Home
+// Assistant integration does when it has no LAN connection.
+func setDPS(p setDPSParams) (any, error) {
+	return publishDPS(p.Session.client(), p.ID, p.DPS)
+}
+
+func publishDPS(c *client, id string, dps map[string]json.RawMessage) (any, error) {
+	if id == "" || len(dps) == 0 {
+		return nil, fmt.Errorf("missing device id or data points")
+	}
+	if _, err := c.call("tuya.m.device.dp.publish", "1.0",
+		map[string]any{"devId": id, "gwId": id, "dps": dps}, nil); err != nil {
+		return nil, err
+	}
+	return map[string]any{"sent": true}, nil
 }

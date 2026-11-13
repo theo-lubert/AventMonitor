@@ -23,7 +23,7 @@ struct PanelView: View {
             case .loggedOut:
                 LoginView().padding(.horizontal, 6).padding(.top, 2)
             case .loggedIn:
-                CameraList(open: open)
+                CameraList(open: open, talk: talk)
             }
         }
         .padding(10)
@@ -50,6 +50,12 @@ struct PanelView: View {
         if pip { stream.requestPiP() }
         openWindow(id: "camera", value: cameraID)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Talking needs the camera's audio stream, so it happens in the camera window.
+    private func talk(_ cameraID: String) {
+        open(cameraID, pip: false)
+        model.stream(for: cameraID).beginTalk()
     }
 }
 
@@ -143,6 +149,9 @@ private extension Image {
 private struct CameraList: View {
     @EnvironmentObject private var model: AppModel
     let open: (String, Bool) -> Void
+    let talk: (String) -> Void
+    /// Rooms whose state this panel reads while it is shown.
+    @State private var watched: [RoomControls] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -152,9 +161,21 @@ private struct CameraList: View {
                     .padding(6)
             }
             ForEach(model.cameras) { cam in
-                CameraTile(camera: cam, thumbnails: model.thumbnails, open: open)
+                VStack(spacing: 6) {
+                    CameraTile(camera: cam, thumbnails: model.thumbnails, room: model.room(for: cam.id), open: open)
+                        .disabled(model.bridge == nil)
+                    if cam.online {
+                        RoomQuickActions(room: model.room(for: cam.id)) { talk(cam.id) }
+                    }
+                }
             }
-            .disabled(model.bridge == nil)
+            Color.clear.frame(height: 0)
+                .onAppear(perform: watchRooms)
+                .onDisappear(perform: unwatchRooms)
+                .onChange(of: model.cameras.map(\.id)) { _, _ in
+                    unwatchRooms()
+                    watchRooms()
+                }
             if let error = model.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal, 6)
             } else if model.bridge == nil, !model.cameras.isEmpty, !model.isBusy {
@@ -165,10 +186,24 @@ private struct CameraList: View {
     }
 }
 
+extension CameraList {
+    fileprivate func watchRooms() {
+        guard watched.isEmpty else { return }
+        watched = model.cameras.filter(\.online).map { model.room(for: $0.id) }
+        watched.forEach { $0.watch() }
+    }
+
+    fileprivate func unwatchRooms() {
+        watched.forEach { $0.unwatch() }
+        watched = []
+    }
+}
+
 /// Last still of the camera: click opens the window, the corner button starts PiP.
 private struct CameraTile: View {
     let camera: Camera
     @ObservedObject var thumbnails: ThumbnailStore
+    @ObservedObject var room: RoomControls
     let open: (String, Bool) -> Void
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
@@ -192,6 +227,15 @@ private struct CameraTile: View {
                             liveBadge
                         } else if let thumbnail {
                             age(of: thumbnail.date)
+                        }
+                        if camera.online, let t = room.state?.temperature {
+                            Text(t.formatted(.number.precision(.fractionLength(1))) + " °C")
+                                .font(.caption2.weight(.medium))
+                                .monospacedDigit()
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(.black.opacity(0.45), in: Capsule())
+                                .help("Température de la chambre")
                         }
                         Spacer()
                     }

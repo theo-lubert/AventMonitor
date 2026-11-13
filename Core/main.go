@@ -42,8 +42,9 @@ var (
 )
 
 type bridgeInfo struct {
-	Port    int         `json:"port"`
-	Cameras []bridgeCam `json:"cameras"`
+	Port     int         `json:"port"`
+	Talkback bool        `json:"talkback"`
+	Cameras  []bridgeCam `json:"cameras"`
 }
 
 type bridgeCam struct {
@@ -105,6 +106,10 @@ func AventCall(req *C.char) *C.char {
 			return withParams(r.Params, userInfo)
 		case "cameras":
 			return withParams(r.Params, listCameras)
+		case "deviceState":
+			return withParams(r.Params, deviceStateOf)
+		case "setDps":
+			return withParams(r.Params, setDPS)
 		case "startBridge":
 			return withParams(r.Params, startBridge)
 		case "stopBridge":
@@ -181,6 +186,11 @@ type startParams struct {
 	Session Session  `json:"session"`
 	Cameras []Camera `json:"cameras"`
 	Port    int      `json:"port"`
+	// Talkback asks the cameras for two-way audio, so a client can talk
+	// through the stream. It makes a camera stop a playing lullaby and
+	// restart it when the stream closes (aventproxy issue #72), so the app
+	// turns it on only while the user wants to talk.
+	Talkback bool `json:"talkback"`
 }
 
 // startBridge does what avent-webrtc-bridge's `addon` command does, minus the
@@ -226,7 +236,7 @@ func startBridge(p startParams) (*bridgeInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("no free port: %w", err)
 	}
-	info := &bridgeInfo{Port: port}
+	info := &bridgeInfo{Port: port, Talkback: p.Talkback}
 	infos := make([]storage.CameraInfo, 0, len(p.Cameras))
 	for _, c := range p.Cameras {
 		path := rtspPath(c)
@@ -242,11 +252,12 @@ func startBridge(p startParams) (*bridgeInfo, error) {
 	srv := rtsp.NewRTSPServer(port, store)
 	srv.BindAddress = "127.0.0.1" // the RTSP server has no authentication
 	srv.MobileClient = client
+	srv.Talkback = p.Talkback
 	if err := srv.Start(); err != nil {
 		return nil, fmt.Errorf("start RTSP server: %w", err)
 	}
 	server = srv
-	core.Logger.Info().Msgf("Serving %d camera(s) on 127.0.0.1:%d", len(infos), port)
+	core.Logger.Info().Msgf("Serving %d camera(s) on 127.0.0.1:%d (talkback: %v)", len(infos), port, p.Talkback)
 	return info, nil
 }
 
