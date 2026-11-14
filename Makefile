@@ -14,10 +14,10 @@ $(PROJECT): project.yml
 project: $(PROJECT)
 
 build: $(PROJECT)
-	$(XCODEBUILD) -configuration Debug build
+	$(XCODEBUILD) -configuration Debug build; status=$$?; Scripts/unregister-builds.sh; exit $$status
 
 release: $(PROJECT)
-	$(XCODEBUILD) -configuration Release build
+	$(XCODEBUILD) -configuration Release build; status=$$?; Scripts/unregister-builds.sh; exit $$status
 
 test: test-go test-swift
 
@@ -27,7 +27,7 @@ test-go:
 	cd Core && go vet ./... && go test ./...
 
 test-swift: $(PROJECT)
-	$(XCODEBUILD) -configuration Debug test
+	$(XCODEBUILD) -configuration Debug test; status=$$?; Scripts/unregister-builds.sh; exit $$status
 
 # Builds Release into ~/Applications and relaunches it.
 install: $(PROJECT)

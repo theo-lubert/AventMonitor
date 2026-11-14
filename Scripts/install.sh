@@ -26,5 +26,8 @@ pkill -x "$APP_NAME" 2>/dev/null || true
 mkdir -p "$HOME/Applications"
 rm -rf "$DEST"
 ditto "$APP" "$DEST"
+# Only the installed copy should be known to macOS, not the build products.
+Scripts/unregister-builds.sh
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$DEST"
 open "$DEST"
 echo "Installed $DEST ($(stat -f '%Sm' "$DEST/Contents/MacOS/$APP_NAME"))"
