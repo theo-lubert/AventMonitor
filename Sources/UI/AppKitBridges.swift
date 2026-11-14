@@ -133,3 +133,61 @@ struct WindowAccessor: NSViewRepresentable {
         }
     }
 }
+
+/// Reports whether the hosting window is actually on screen: ordered in, not
+/// minimized and not fully covered. The menu bar panel is ordered out when it closes.
+/// Calls are balanced: every `true` is followed by a `false`, at the latest on removal.
+struct WindowVisibilityObserver: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> ObservingView {
+        let view = ObservingView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ view: ObservingView, context: Context) {
+        view.onChange = onChange
+    }
+
+    static func dismantleNSView(_ view: ObservingView, coordinator: ()) {
+        view.detach()
+    }
+
+    final class ObservingView: NSView {
+        var onChange: ((Bool) -> Void)?
+        private var visible = false
+        private var observer: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            if let window {
+                observer = NotificationCenter.default.addObserver(
+                    forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.update() }
+                }
+            }
+            update()
+        }
+
+        func detach() {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            set(false)
+        }
+
+        private func update() {
+            guard let window else { return set(false) }
+            set(window.isVisible && window.occlusionState.contains(.visible))
+        }
+
+        private func set(_ newValue: Bool) {
+            guard newValue != visible else { return }
+            visible = newValue
+            onChange?(newValue)
+        }
+    }
+}

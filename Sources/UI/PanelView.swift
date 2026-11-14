@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// Content shared by the menu bar panel and the main window.
@@ -23,12 +24,15 @@ struct PanelView: View {
             case .loggedOut:
                 LoginView().padding(.horizontal, 6).padding(.top, 2)
             case .loggedIn:
-                CameraList(open: open, talk: talk)
+                CameraList(host: showsQuit ? .menu : .mainWindow, open: open, talk: talk)
             }
         }
         .padding(10)
         .frame(width: 300)
         .background(shortcuts)
+        .background(WindowVisibilityObserver { visible in
+            model.panelVisibilityChanged(visible, host: showsQuit ? .menu : .mainWindow)
+        })
     }
 
     /// Menu items only fire while the menu is open; keep ⌘R / ⌘Q live on the panel.
@@ -148,6 +152,7 @@ private extension Image {
 
 private struct CameraList: View {
     @EnvironmentObject private var model: AppModel
+    let host: AppModel.PanelHost
     let open: (String, Bool) -> Void
     let talk: (String) -> Void
     /// Rooms whose state this panel reads while it is shown.
@@ -163,7 +168,8 @@ private struct CameraList: View {
             ForEach(model.cameras) { cam in
                 VStack(spacing: 6) {
                     CameraTile(camera: cam, thumbnails: model.thumbnails, activity: model.activity,
-                               room: model.room(for: cam.id), open: open)
+                               room: model.room(for: cam.id),
+                               showsLive: model.livePreviewHost == host, open: open)
                         .disabled(model.bridge == nil)
                     if cam.online {
                         RoomQuickActions(room: model.room(for: cam.id)) { talk(cam.id) }
@@ -200,12 +206,15 @@ extension CameraList {
     }
 }
 
-/// Last still of the camera: click opens the window, the corner button starts PiP.
+/// Live video while the panel is open, else the last still: click opens the window, the corner button starts PiP.
 private struct CameraTile: View {
+    @EnvironmentObject private var model: AppModel
     let camera: Camera
     @ObservedObject var thumbnails: ThumbnailStore
     @ObservedObject var activity: ActivityCenter
     @ObservedObject var room: RoomControls
+    /// This panel shows live video (the other one, if also open, keeps the last still).
+    let showsLive: Bool
     let open: (String, Bool) -> Void
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
@@ -215,6 +224,13 @@ private struct CameraTile: View {
     static let size = CGSize(width: 280, height: 158)
 
     private var thumbnail: ThumbnailStore.Thumbnail? { thumbnails.thumbnails[camera.id] }
+    /// Frames of the live preview, once the stream shows video.
+    private var liveLayer: AVSampleBufferDisplayLayer? {
+        guard showsLive, thumbnails.live.contains(camera.id),
+              let s = model.streamIfOpen(camera.id), s.previewing
+        else { return nil }
+        return s.previewLayer
+    }
 
     var body: some View {
         Button { open(camera.id, false) } label: {
@@ -225,7 +241,7 @@ private struct CameraTile: View {
                 LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
                 VStack {
                     HStack {
-                        if thumbnails.live.contains(camera.id) {
+                        if liveLayer != nil {
                             liveBadge
                         } else if activity.disconnected.contains(camera.id) {
                             reconnectingBadge
@@ -288,7 +304,12 @@ private struct CameraTile: View {
     }
 
     @ViewBuilder private var background: some View {
-        if let thumbnail {
+        if let liveLayer {
+            // An AppKit layer ignores SwiftUI's brightness: dim it with an overlay.
+            VideoLayerView(layer: liveLayer)
+                .allowsHitTesting(false)
+                .overlay(Color.black.opacity(hovering && isEnabled ? 0.15 : 0))
+        } else if let thumbnail {
             Image(nsImage: thumbnail.image)
                 .resizable()
                 .aspectRatio(contentMode: .fill)

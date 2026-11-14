@@ -18,6 +18,12 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var coreFailure: String?
 
+    /// Where camera tiles are shown: the main window or the menu bar panel.
+    enum PanelHost { case mainWindow, menu }
+    /// The panel whose tiles show live video. A video layer can only be on screen in
+    /// one place, so the main window wins; the other panel keeps the last still.
+    @Published private(set) var livePreviewHost: PanelHost?
+
     // Login flow
     @Published private(set) var awaitingCode = false
     @Published private(set) var codeSentTo = ""
@@ -63,6 +69,15 @@ final class AppModel: ObservableObject {
     /// Cameras the user is talking through. The bridge offers return channels while any is.
     private var talkbackCameras: Set<String> = []
     private var bridgeTask: Task<Void, Never>?
+    /// Cameras with an open window (which may be in PiP).
+    private var windowStreams: Set<String> = []
+    /// Cameras streaming only for the panel's live tiles.
+    private var previewStreams: Set<String> = []
+    /// Panels currently on screen, by kind.
+    private var visiblePanels: [PanelHost: Int] = [:]
+    /// Preview streams outlive the panel briefly, so reopening it is instant.
+    private static let previewLinger: TimeInterval = 10
+    private var previewStopWork: DispatchWorkItem?
 
     enum DefaultsKey {
         static let dock = "showDockIcon"
@@ -171,6 +186,10 @@ final class AppModel: ObservableObject {
         for room in rooms.values { room.shutdown() }
         rooms.removeAll()
         talkbackCameras.removeAll()
+        windowStreams.removeAll()
+        previewStreams.removeAll()
+        previewStopWork?.cancel()
+        previewStopWork = nil
         liveObservers.removeAll()
         thumbnails.removeAll()
         activity.clearAll()
@@ -204,6 +223,7 @@ final class AppModel: ObservableObject {
             let changed = found.map(\.id) != cameras.map(\.id) || found.map(\.name) != cameras.map(\.name)
             cameras = found
             for cam in found { streams[cam.id]?.name = cam.name }
+            updatePreviews()
             if bridge == nil || changed { try await startBridge() }
             errorMessage = nil
         } catch let e as CoreError where e.isSessionExpired {
@@ -314,8 +334,68 @@ final class AppModel: ObservableObject {
 
     func streamIfOpen(_ cameraID: String) -> CameraStream? { streams[cameraID] }
 
+    /// A camera window appeared: stream with sound.
+    func openStream(_ cameraID: String) {
+        windowStreams.insert(cameraID)
+        let s = stream(for: cameraID)
+        s.audible = true
+        s.start()
+    }
+
+    /// A camera window went away: stop unless PiP or the panel still shows it.
     func closeStream(_ cameraID: String) {
         guard let s = streams[cameraID], !s.pipActive else { return }
+        windowStreams.remove(cameraID)
+        // The preview may keep the stream: never leave the microphone open behind it.
+        if s.talk != .off { s.endTalk() }
+        s.audible = false
+        releaseIfUnused(cameraID)
+    }
+
+    /// The menu bar panel or the main window was shown or hidden. While one is on
+    /// screen its tiles show live video instead of the last still.
+    func panelVisibilityChanged(_ visible: Bool, host: PanelHost) {
+        visiblePanels[host] = max(0, visiblePanels[host, default: 0] + (visible ? 1 : -1))
+        let newHost: PanelHost? = visiblePanels[.mainWindow, default: 0] > 0 ? .mainWindow
+            : visiblePanels[.menu, default: 0] > 0 ? .menu : nil
+        if livePreviewHost != newHost { livePreviewHost = newHost }
+
+        previewStopWork?.cancel()
+        previewStopWork = nil
+        if newHost != nil {
+            updatePreviews()
+        } else {
+            let work = DispatchWorkItem { [weak self] in
+                self?.previewStopWork = nil
+                self?.updatePreviews()
+            }
+            previewStopWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.previewLinger, execute: work)
+        }
+    }
+
+    private func updatePreviews() {
+        // While lingering after the panel closed, keep what is already running.
+        if previewStopWork != nil { return }
+        let wanted: Set<String> = livePreviewHost != nil && phase == .loggedIn
+            ? Set(cameras.filter(\.online).map(\.id)) : []
+        for id in previewStreams.subtracting(wanted) {
+            previewStreams.remove(id)
+            streams[id]?.previewing = false
+            releaseIfUnused(id)
+        }
+        for id in wanted.subtracting(previewStreams) {
+            previewStreams.insert(id)
+            let s = stream(for: id)
+            if !windowStreams.contains(id) { s.audible = false }
+            s.previewing = true
+            s.start()
+        }
+    }
+
+    private func releaseIfUnused(_ cameraID: String) {
+        guard let s = streams[cameraID], !s.pipActive,
+              !windowStreams.contains(cameraID), !previewStreams.contains(cameraID) else { return }
         s.stop()
         streams[cameraID] = nil
         liveObservers[cameraID] = nil

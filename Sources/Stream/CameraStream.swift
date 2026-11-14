@@ -55,6 +55,21 @@ final class CameraStream: NSObject, ObservableObject {
             UserDefaults.standard.set(muted, forKey: DefaultsKey.muted)
         }
     }
+    /// Sound plays only where the user asked for the camera (window or PiP),
+    /// not for the menu's live preview.
+    var audible = true {
+        didSet { if audible != oldValue { applyMute() } }
+    }
+    /// Feeds `previewLayer` too, while the menu shows this camera live.
+    var previewing = false {
+        didSet {
+            guard previewing != oldValue else { return }
+            let previewing = previewing
+            let preview = preview
+            ioQueue.async { preview.enabled = previewing }
+            if !previewing { previewLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil) }
+        }
+    }
 
     /// Talking through the camera: `preparing` while the bridge reopens the stream with a
     /// return channel, `ready` once it can carry our voice, `talking` while the mic is open.
@@ -74,6 +89,8 @@ final class CameraStream: NSObject, ObservableObject {
     }
 
     let layer = AVSampleBufferDisplayLayer()
+    /// Second display of the same frames, for the menu's tile (a layer has a single parent).
+    let previewLayer = AVSampleBufferDisplayLayer()
     var urlProvider: () -> URL? = { nil }
     /// Called when the user closes PiP without asking to restore the window.
     var onPiPDismissed: (() -> Void)?
@@ -101,6 +118,9 @@ final class CameraStream: NSObject, ObservableObject {
     private var client: RTSPClient?
     private let pipeline: MediaPipeline
     private let ioQueue: DispatchQueue
+    /// Whether frames also go to `previewLayer`. Confined to the I/O queue.
+    private final class PreviewSwitch: @unchecked Sendable { var enabled = false }
+    private let preview = PreviewSwitch()
     private var pip: AVPictureInPictureController?
     private var possibleObservation: NSKeyValueObservation?
     private var watchdog: Timer?
@@ -126,15 +146,26 @@ final class CameraStream: NSObject, ObservableObject {
         super.init()
         layer.videoGravity = .resizeAspect
         layer.backgroundColor = NSColor.black.cgColor
+        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.backgroundColor = NSColor.black.cgColor
 
         // The renderer is documented to accept samples from any queue.
         nonisolated(unsafe) let renderer = layer.sampleBufferRenderer
+        nonisolated(unsafe) let previewRenderer = previewLayer.sampleBufferRenderer
+        let preview = preview
         let muted = muted
         onPipeline { [weak self] pipeline in
             pipeline.muted = muted
             pipeline.onDisplay = { sample in
                 Self.recoverIfStalled(renderer)
                 renderer.enqueue(sample)
+                if preview.enabled {
+                    Self.recoverIfStalled(previewRenderer)
+                    // Off screen (panel closed, or the other panel has the video) the
+                    // preview stops draining: drop the backlog so it resumes on a live frame.
+                    if !previewRenderer.isReadyForMoreMediaData { previewRenderer.flush() }
+                    previewRenderer.enqueue(sample)
+                }
             }
             pipeline.onFirstFrame = { self?.onMain { $0.didReceiveFirstFrame() } }
             pipeline.onDimensions = { dims in
@@ -207,6 +238,7 @@ final class CameraStream: NSObject, ObservableObject {
         soundLevel = nil
         if pip?.isPictureInPictureActive == true { pip?.stopPictureInPicture() }
         layer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        previewLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
         status = .idle
     }
 
@@ -399,7 +431,7 @@ final class CameraStream: NSObject, ObservableObject {
     }
 
     private func applyMute() {
-        let silent = muted || talk == .talking
+        let silent = muted || !audible || talk == .talking
         onPipeline { $0.muted = silent }
     }
 

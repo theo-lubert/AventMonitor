@@ -70,7 +70,7 @@ private struct CameraPlayerView: View {
             if window !== w { DispatchQueue.main.async { window = w } }
         })
         .onAppear {
-            stream.start()
+            model.openStream(stream.cameraID)
             room.watch()
         }
         .onDisappear {
@@ -92,7 +92,7 @@ private struct CameraPlayerView: View {
     private var controls: some View {
         HStack(spacing: 14) {
             Circle()
-                .fill(stream.status == .live ? Color.red : Color.orange)
+                .fill(stream.status == .live ? Color.green : Color.orange)
                 .frame(width: 8, height: 8)
             Text(stream.status == .live ? "EN DIRECT" : stream.status.label)
                 .font(.caption.weight(.semibold))
