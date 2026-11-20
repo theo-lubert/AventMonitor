@@ -1,0 +1,95 @@
+Bridge: keep the host's default route address when filtering Docker-like IPs.
+
+go2rtc's WebRTC API drops every local IPv4 address in 172.16.0.0/12, which it
+treats as Docker. An iPhone personal hotspot hands out 172.20.10.x, inside that
+range, so on a Mac tethered to a phone the only routed address was dropped: STUN
+and TURN went out through an unrouted interface (Docker Desktop's bridge100), no
+reflexive or relay candidate was gathered, and the camera hung up after 15 s
+(disconnect, close_reason 100). The filter now keeps the address of the default
+route and still drops the rest of the range.
+
+Applied by Scripts/build-core.sh to a copy of Vendor/aventproxy/avent-webrtc-bridge.
+
+--- a/pkg/webrtc/api.go	2026-11-20 23:17:01
++++ b/pkg/webrtc/api.go	2026-11-20 23:17:14
+@@ -70,10 +70,11 @@
+ 			return utils.Contains(filters.IPs, ip.String())
+ 		}
+ 	} else {
+-		// try filter all Docker-like interfaces
+-		ipFilter = func(ip net.IP) bool {
+-			return !xnet.Docker.Contains(ip)
+-		}
++		// try filter all Docker-like interfaces, but keep the address the host
++		// reaches the internet from: a phone's hotspot hands out 172.20.10.x,
++		// inside the Docker range, and dropping it left only unrouted
++		// interfaces, so no STUN or TURN candidate could be gathered.
++		ipFilter = xnet.DockerFilter(xnet.DefaultRouteIP())
+ 		// if there are no such interfaces - disable the filter
+ 		// the user will need to enable port forwarding
+ 		if nets, _ := xnet.IPNets(ipFilter); len(nets) == 0 {
+--- a/pkg/xnet/net.go	2026-11-20 23:17:01
++++ b/pkg/xnet/net.go	2026-11-20 23:17:14
+@@ -17,6 +17,28 @@
+ 	Mask: []byte{255, 240, 0, 0},
+ }
+ 
++// DockerFilter returns an IP filter that drops Docker-like addresses, except
++// keep, the address of the host's default route (nil keeps none).
++func DockerFilter(keep net.IP) func(ip net.IP) bool {
++	return func(ip net.IP) bool {
++		return !Docker.Contains(ip) || (keep != nil && ip.Equal(keep))
++	}
++}
++
++// DefaultRouteIP returns the local IPv4 address the host uses to reach the
++// internet, or nil. Connecting a UDP socket only picks a route: no packet is sent.
++func DefaultRouteIP() net.IP {
++	conn, err := net.Dial("udp4", "192.0.2.1:9") // TEST-NET-1, never contacted
++	if err != nil {
++		return nil
++	}
++	defer conn.Close()
++	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
++		return addr.IP.To4()
++	}
++	return nil
++}
++
+ // ParseUnspecifiedPort will return port if address is unspecified
+ // ex. ":8555" or "0.0.0.0:8555"
+ func ParseUnspecifiedPort(address string) int {
+--- a/pkg/xnet/net_test.go	1970-01-01 01:00:00
++++ b/pkg/xnet/net_test.go	2026-11-20 23:17:14
+@@ -0,0 +1,31 @@
++package xnet
++
++import (
++	"net"
++	"testing"
++)
++
++func TestDockerFilterKeepsDefaultRouteAddress(t *testing.T) {
++	hotspot := net.ParseIP("172.20.10.6").To4()
++	filter := DockerFilter(hotspot)
++
++	if !filter(hotspot) {
++		t.Errorf("the default route address %s was filtered out", hotspot)
++	}
++	if filter(net.ParseIP("172.17.0.1").To4()) {
++		t.Error("docker0 address was kept")
++	}
++	if !filter(net.ParseIP("192.168.1.10").To4()) {
++		t.Error("LAN address was filtered out")
++	}
++}
++
++func TestDockerFilterWithoutDefaultRoute(t *testing.T) {
++	filter := DockerFilter(nil)
++	if filter(net.ParseIP("172.20.10.6").To4()) {
++		t.Error("Docker-range address kept with no default route")
++	}
++	if !filter(net.ParseIP("10.0.0.2").To4()) {
++		t.Error("non-Docker address filtered out")
++	}
++}
