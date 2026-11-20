@@ -10,7 +10,6 @@ struct PanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Footer(showsQuit: showsQuit)
-            Divider().padding(.horizontal, 2)
             if let failure = model.coreFailure {
                 Label(failure, systemImage: "exclamationmark.octagon.fill")
                     .foregroundStyle(.red)
@@ -66,7 +65,7 @@ struct PanelView: View {
     }
 }
 
-/// Top bar: account on the left, settings ⚙︎ and quit ⏻ on the right.
+/// Top bar: account on the left, settings ⚙︎ (with Quit) on the right.
 private struct Footer: View {
     @EnvironmentObject private var model: AppModel
     let showsQuit: Bool
@@ -84,14 +83,7 @@ private struct Footer: View {
             }
             Spacer(minLength: 4)
             if model.isBusy { ProgressView().controlSize(.mini) }
-            SettingsMenu()
-            if showsQuit {
-                Button { NSApp.terminate(nil) } label: {
-                    Image(systemName: "power").footerIcon()
-                }
-                .buttonStyle(.plain)
-                .help("Quitter (⌘Q)")
-            }
+            SettingsMenu(showsQuit: showsQuit)
         }
         .padding(.horizontal, 4)
     }
@@ -99,6 +91,7 @@ private struct Footer: View {
 
 private struct SettingsMenu: View {
     @EnvironmentObject private var model: AppModel
+    let showsQuit: Bool
     /// Build info is shown only while ⌥ is held, like macOS hidden menu items.
     @State private var optionDown = NSEvent.modifierFlags.contains(.option)
     @State private var flagsMonitor: Any?
@@ -121,6 +114,11 @@ private struct SettingsMenu: View {
             if optionDown {
                 Divider()
                 Text("Build du \(BuildInfo.date)")
+            }
+            if showsQuit {
+                Divider()
+                Button("Quitter Baby Monitor") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q")
             }
         } label: {
             Image(systemName: "gearshape").footerIcon()
