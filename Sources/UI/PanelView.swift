@@ -50,10 +50,13 @@ struct PanelView: View {
     }
 
     private func open(_ cameraID: String, pip: Bool) {
+        defer { NSApp.activate(ignoringOtherApps: true) }
+        // One window per camera: SwiftUI does not always reuse the open one,
+        // notably while it is hidden behind PiP.
+        if model.revealWindow(cameraID, pip: pip) { return }
         let stream = model.stream(for: cameraID)
         if pip { stream.requestPiP() }
         openWindow(id: "camera", value: cameraID)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Talking needs the camera's audio stream, so it happens in the camera window.

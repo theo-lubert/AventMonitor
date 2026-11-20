@@ -65,8 +65,8 @@ final class CameraStream: NSObject, ObservableObject {
         didSet {
             guard previewing != oldValue else { return }
             let previewing = previewing
-            let preview = preview
-            ioQueue.async { preview.enabled = previewing }
+            let targets = targets
+            ioQueue.async { targets.previewEnabled = previewing }
             if !previewing { previewLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil) }
         }
     }
@@ -88,7 +88,8 @@ final class CameraStream: NSObject, ObservableObject {
         }
     }
 
-    let layer = AVSampleBufferDisplayLayer()
+    /// The window's display layer. Replaced by a fresh one each time PiP ends (see `renewDisplayLayer`).
+    @Published private(set) var layer: AVSampleBufferDisplayLayer
     /// Second display of the same frames, for the menu's tile (a layer has a single parent).
     let previewLayer = AVSampleBufferDisplayLayer()
     var urlProvider: () -> URL? = { nil }
@@ -118,9 +119,14 @@ final class CameraStream: NSObject, ObservableObject {
     private var client: RTSPClient?
     private let pipeline: MediaPipeline
     private let ioQueue: DispatchQueue
-    /// Whether frames also go to `previewLayer`. Confined to the I/O queue.
-    private final class PreviewSwitch: @unchecked Sendable { var enabled = false }
-    private let preview = PreviewSwitch()
+    /// Where the I/O queue sends frames. Confined to the I/O queue.
+    private final class DisplayTargets: @unchecked Sendable {
+        var main: AVSampleBufferVideoRenderer
+        /// Whether frames also go to `previewLayer`.
+        var previewEnabled = false
+        init(main: AVSampleBufferVideoRenderer) { self.main = main }
+    }
+    private let targets: DisplayTargets
     private var pip: AVPictureInPictureController?
     private var possibleObservation: NSKeyValueObservation?
     private var watchdog: Timer?
@@ -143,23 +149,24 @@ final class CameraStream: NSObject, ObservableObject {
         let queue = DispatchQueue(label: "camera.stream.io", qos: .userInteractive)
         ioQueue = queue
         pipeline = MediaPipeline(queue: queue)
+        let display = Self.makeDisplayLayer()
+        _layer = Published(initialValue: display)
+        targets = DisplayTargets(main: display.sampleBufferRenderer)
         super.init()
-        layer.videoGravity = .resizeAspect
-        layer.backgroundColor = NSColor.black.cgColor
         previewLayer.videoGravity = .resizeAspectFill
         previewLayer.backgroundColor = NSColor.black.cgColor
 
         // The renderer is documented to accept samples from any queue.
-        nonisolated(unsafe) let renderer = layer.sampleBufferRenderer
         nonisolated(unsafe) let previewRenderer = previewLayer.sampleBufferRenderer
-        let preview = preview
+        let targets = targets
         let muted = muted
         onPipeline { [weak self] pipeline in
             pipeline.muted = muted
             pipeline.onDisplay = { sample in
+                let renderer = targets.main
                 Self.recoverIfStalled(renderer)
                 renderer.enqueue(sample)
-                if preview.enabled {
+                if targets.previewEnabled {
                     Self.recoverIfStalled(previewRenderer)
                     // Off screen (panel closed, or the other panel has the video) the
                     // preview stops draining: drop the backlog so it resumes on a live frame.
@@ -175,6 +182,39 @@ final class CameraStream: NSObject, ObservableObject {
             pipeline.onActivity = { kind in self?.onMain { $0.onActivity?(kind) } }
             pipeline.onThumbnail = { image in self?.onMain { $0.onThumbnail?(image) } }
         }
+    }
+
+    private static func makeDisplayLayer() -> AVSampleBufferDisplayLayer {
+        let layer = AVSampleBufferDisplayLayer()
+        layer.videoGravity = .resizeAspect
+        layer.backgroundColor = NSColor.black.cgColor
+        return layer
+    }
+
+    /// Leaving PiP sometimes leaves the window's display layer black for good: frames
+    /// keep being enqueued and accepted (sound, motion and the watchdog all see them),
+    /// but the layer never shows them again. Closing and reopening the window, which
+    /// makes a new layer, was the only way out. So after each PiP session, put a fresh
+    /// layer in the window, with a PiP controller bound to it. Frames are already
+    /// decoded, so the new layer shows the very next one.
+    private func renewDisplayLayer() {
+        let old = layer
+        let renderer = old.sampleBufferRenderer
+        let sublayers = (old.sublayers ?? []).map { String(describing: type(of: $0)) }.joined(separator: ",")
+        videoLog.notice("\(self.name, privacy: .public): renewing display layer after PiP (frame \(String(describing: old.frame), privacy: .public), attached \(old.superlayer != nil, privacy: .public), hidden \(old.isHidden, privacy: .public), opacity \(old.opacity, privacy: .public), sublayers [\(sublayers, privacy: .public)], renderer status \(renderer.status.rawValue, privacy: .public), ready \(renderer.isReadyForMoreMediaData, privacy: .public))")
+
+        possibleObservation = nil
+        pip?.delegate = nil
+        pip = nil
+        pipPossible = false
+
+        let fresh = Self.makeDisplayLayer()
+        nonisolated(unsafe) let freshRenderer = fresh.sampleBufferRenderer
+        let targets = targets
+        ioQueue.async { targets.main = freshRenderer }
+        layer = fresh
+        renderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        if window != nil { setUpPiP() }
     }
 
     /// A renderer that failed, or that needs a flush to resume (after a display or GPU
@@ -437,9 +477,36 @@ final class CameraStream: NSObject, ObservableObject {
 
     // MARK: Window
 
+    /// Shows the camera's open window again (bringing it back from PiP), or starts PiP
+    /// from it. False if the camera has no window.
+    func reveal(pip wantsPiP: Bool) -> Bool {
+        guard let window else { return false }
+        if wantsPiP {
+            requestPiP()
+            return true
+        }
+        if pipActive {
+            restoringFromPiP = true
+            pip?.stopPictureInPicture()
+        }
+        window.makeKeyAndOrderFront(nil)
+        return true
+    }
+
+    private var windowCloseObserver: NSObjectProtocol?
+
     func attach(window: NSWindow) {
         guard self.window !== window else { return }
         self.window = window
+        if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self, weak window] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.window === window else { return }
+                self.window = nil
+            }
+        }
         window.title = name
         window.isMovableByWindowBackground = true
         applyAspectRatio()
@@ -651,6 +718,7 @@ extension CameraStream: AVPictureInPictureControllerDelegate, AVPictureInPicture
         Task { @MainActor in
             self.pipActive = false
             self.stopObservingPiPResizes()
+            self.renewDisplayLayer()
             if self.restoringFromPiP {
                 self.restoringFromPiP = false
             } else {
