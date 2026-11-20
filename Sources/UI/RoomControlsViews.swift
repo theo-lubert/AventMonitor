@@ -243,16 +243,35 @@ private struct RoomError: View {
 
     var body: some View {
         if let error = room.error {
-            Label(error, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .lineLimit(2)
+            RoomErrorLine(detail: error, font: .caption)
         } else if room.state == nil {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text("Lecture de l'état de la caméra…").font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// A plain message for the user; the raw error (often a Tuya API or network
+/// message) only appears in the tooltip of the info icon.
+struct RoomErrorLine: View {
+    let detail: String
+    var font: Font = .caption
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Label("Impossible de joindre la caméra", systemImage: "exclamationmark.triangle.fill")
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+                .help(detail)
+                .accessibilityLabel(detail)
+        }
+        .font(font)
+        .foregroundStyle(.orange)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -438,8 +457,7 @@ struct RoomQuickActions: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
             if let error = room.error {
-                Text(error).font(.caption2).foregroundStyle(.orange).lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                RoomErrorLine(detail: error, font: .caption2)
             }
         }
         .animation(.easeInOut(duration: 0.15), value: state?.lullabyPlaying)
