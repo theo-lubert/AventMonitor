@@ -164,7 +164,8 @@ private struct CameraList: View {
             if model.cameras.isEmpty {
                 Text(model.isBusy ? "Recherche des caméras…" : "Aucune caméra sur ce compte.")
                     .font(.callout).foregroundStyle(.secondary)
-                    .padding(6)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, minHeight: 120)
             }
             ForEach(model.cameras) { cam in
                 VStack(spacing: 6) {
