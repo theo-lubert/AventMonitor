@@ -71,6 +71,9 @@ final class AppModel: ObservableObject {
     private var bridgeTask: Task<Void, Never>?
     /// Cameras with an open window (which may be in PiP).
     private var windowStreams: Set<String> = []
+    /// The view owning each camera's window. A camera never gets a second window:
+    /// its display layer can only be shown in one place.
+    private var windowOwners: [String: UUID] = [:]
     /// Cameras streaming only for the panel's live tiles.
     private var previewStreams: Set<String> = []
     /// Panels currently on screen, by kind.
@@ -333,6 +336,25 @@ final class AppModel: ObservableObject {
     }
 
     func streamIfOpen(_ cameraID: String) -> CameraStream? { streams[cameraID] }
+
+    /// A camera window's view appeared. False if the camera already has a window,
+    /// in which case this one must close without touching the stream.
+    func claimWindow(_ cameraID: String, owner: UUID) -> Bool {
+        if let current = windowOwners[cameraID] { return current == owner }
+        windowOwners[cameraID] = owner
+        return true
+    }
+
+    func releaseWindow(_ cameraID: String, owner: UUID) {
+        if windowOwners[cameraID] == owner { windowOwners[cameraID] = nil }
+    }
+
+    /// Brings back the camera's window, or starts PiP from it, if it has one open
+    /// (possibly hidden behind PiP). False if a window has to be opened.
+    func revealWindow(_ cameraID: String, pip: Bool) -> Bool {
+        guard windowOwners[cameraID] != nil, let s = streams[cameraID] else { return false }
+        return s.reveal(pip: pip)
+    }
 
     /// A camera window appeared: stream with sound.
     func openStream(_ cameraID: String) {

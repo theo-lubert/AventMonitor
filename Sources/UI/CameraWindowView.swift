@@ -17,6 +17,10 @@ private struct CameraPlayerView: View {
     @State private var hovering = false
     @State private var window: NSWindow?
     @State private var popover: Popover?
+    @State private var ownerID = UUID()
+    /// Nil until the view appears; false for a second window of a camera that already
+    /// has one, which closes at once without touching the stream or its video layer.
+    @State private var isOwner: Bool?
 
     private enum Popover { case light, lullaby }
 
@@ -26,7 +30,9 @@ private struct CameraPlayerView: View {
     var body: some View {
         ZStack {
             Color.black
-            VideoLayerView(layer: stream.layer, pipActive: stream.pipActive)
+            if isOwner == true {
+                VideoLayerView(layer: stream.layer, pipActive: stream.pipActive)
+            }
             if stream.status != .live {
                 StatusBadge(status: stream.status)
             }
@@ -66,22 +72,44 @@ private struct CameraPlayerView: View {
         .animation(.easeInOut(duration: 0.15), value: hovering)
         .onHover { hovering = $0 }
         .background(WindowAccessor { w in
-            stream.attach(window: w)
+            if isOwner == true { stream.attach(window: w) }
             if window !== w { DispatchQueue.main.async { window = w } }
         })
         .onAppear {
-            model.openStream(stream.cameraID)
-            room.watch()
+            let owner = model.claimWindow(stream.cameraID, owner: ownerID)
+            isOwner = owner
+            if owner {
+                model.openStream(stream.cameraID)
+                room.watch()
+            }
+            if let window { adopt(window) }
+        }
+        .onChange(of: window) { _, w in
+            if let w { adopt(w) }
         }
         .onDisappear {
+            guard isOwner == true else { return }
+            model.releaseWindow(stream.cameraID, owner: ownerID)
             room.unwatch()
             model.closeStream(stream.cameraID)
         }
         .onReceive(NotificationCenter.default.publisher(for: .closeCameraWindow)) { note in
-            if note.object as? String == stream.cameraID { close() }
+            if isOwner == true, note.object as? String == stream.cameraID { close() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .closeCameraWindows)) { _ in close() }
+        .onReceive(NotificationCenter.default.publisher(for: .closeCameraWindows)) { _ in
+            if isOwner == true { close() }
+        }
         .navigationTitle(stream.name)
+    }
+
+    /// Binds the window to the stream, or closes it if the camera already has one.
+    private func adopt(_ w: NSWindow) {
+        if isOwner == true {
+            stream.attach(window: w)
+        } else if isOwner == false {
+            w.close()
+            _ = model.revealWindow(stream.cameraID, pip: false)
+        }
     }
 
     private func close() {
