@@ -125,6 +125,9 @@ private struct CameraPlayerView: View {
             Text(stream.status == .live ? "EN DIRECT" : stream.status.label)
                 .font(.caption.weight(.semibold))
                 .lineLimit(1)
+            if let detail = stream.status.detail {
+                ErrorDetailIcon(detail: detail).font(.caption)
+            }
             if stream.status == .live {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     let seconds = Int(stream.secondsSinceLastFrame)
@@ -260,7 +263,11 @@ private struct StatusBadge: View {
             } else {
                 ProgressView().controlSize(.large).tint(.white)
             }
-            Text(status.label).font(.callout)
+            HStack(spacing: 4) {
+                Text(status.label)
+                if let detail = status.detail { ErrorDetailIcon(detail: detail) }
+            }
+            .font(.callout)
         }
         .foregroundStyle(.white.opacity(0.85))
         .padding(20)

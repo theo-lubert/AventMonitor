@@ -264,14 +264,23 @@ struct RoomErrorLine: View {
             Label("Impossible de joindre la caméra", systemImage: "exclamationmark.triangle.fill")
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Image(systemName: "info.circle")
-                .foregroundStyle(.secondary)
-                .help(detail)
-                .accessibilityLabel(detail)
+            ErrorDetailIcon(detail: detail)
         }
         .font(font)
         .foregroundStyle(.orange)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The raw error behind a generic message, in the tooltip of an info icon.
+struct ErrorDetailIcon: View {
+    let detail: String
+
+    var body: some View {
+        Image(systemName: "info.circle")
+            .foregroundStyle(.secondary)
+            .help(detail)
+            .accessibilityLabel(detail)
     }
 }
 
