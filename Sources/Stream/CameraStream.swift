@@ -12,7 +12,8 @@ private let videoLog = Logger(subsystem: "fr.teos.AventMonitor", category: "vide
 final class CameraStream: NSObject, ObservableObject {
     enum Status: Equatable {
         case idle, waitingForBridge, connecting, live
-        case failed(String)
+        /// `detail` is the raw error (RTSP status, network message), shown only on hover.
+        case failed(String, detail: String? = nil)
 
         var label: String {
             switch self {
@@ -20,8 +21,13 @@ final class CameraStream: NSObject, ObservableObject {
             case .waitingForBridge: return "Démarrage du pont…"
             case .connecting: return "Connexion à la caméra…"
             case .live: return "En direct"
-            case .failed(let message): return message
+            case .failed(let message, _): return message
             }
+        }
+
+        var detail: String? {
+            if case .failed(_, let detail) = self { return detail }
+            return nil
         }
     }
 
@@ -328,7 +334,7 @@ final class CameraStream: NSObject, ObservableObject {
         stopMicrophone()
         backchannel = nil
         if talk == .ready || talk == .talking { talk = .preparing }
-        status = .failed(error?.localizedDescription ?? "Flux interrompu")
+        status = .failed("Impossible de joindre la caméra", detail: error?.localizedDescription ?? "Flux interrompu")
         scheduleRetry()
     }
 
