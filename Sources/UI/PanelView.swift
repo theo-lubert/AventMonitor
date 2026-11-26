@@ -29,6 +29,10 @@ struct PanelView: View {
         .padding(10)
         .frame(width: 300)
         .background(shortcuts)
+        .onAppear {
+            let openWindow = openWindow
+            model.openCameraWindow = { openWindow(id: "camera", value: $0) }
+        }
         .background(WindowVisibilityObserver { visible in
             model.panelVisibilityChanged(visible, host: showsQuit ? .menu : .mainWindow)
         })
