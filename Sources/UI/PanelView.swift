@@ -6,6 +6,8 @@ struct PanelView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
     var showsQuit = true
+    /// The menu bar panel or the main window hosting this view.
+    @State private var hostWindow: NSWindow?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -33,6 +35,9 @@ struct PanelView: View {
             let openWindow = openWindow
             model.openCameraWindow = { openWindow(id: "camera", value: $0) }
         }
+        .background(WindowAccessor { w in
+            if hostWindow !== w { DispatchQueue.main.async { hostWindow = w } }
+        })
         .background(WindowVisibilityObserver { visible in
             model.panelVisibilityChanged(visible, host: showsQuit ? .menu : .mainWindow)
         })
@@ -53,7 +58,11 @@ struct PanelView: View {
     }
 
     private func open(_ cameraID: String, pip: Bool) {
-        defer { NSApp.activate(ignoringOtherApps: true) }
+        defer {
+            // The menu bar panel goes away once the camera is opened, as a menu does.
+            if showsQuit { hostWindow?.close() }
+            NSApp.activate(ignoringOtherApps: true)
+        }
         // One window per camera: SwiftUI does not always reuse the open one,
         // notably while it is hidden behind PiP.
         if model.revealWindow(cameraID, pip: pip) { return }
@@ -312,7 +321,7 @@ private struct CameraTile: View {
     @ViewBuilder private var background: some View {
         if let liveLayer {
             // An AppKit layer ignores SwiftUI's brightness: dim it with an overlay.
-            VideoLayerView(layer: liveLayer)
+            VideoLayerView(videoLayer: liveLayer)
                 .allowsHitTesting(false)
                 .overlay(Color.black.opacity(hovering && isEnabled ? 0.15 : 0))
         } else if let thumbnail {

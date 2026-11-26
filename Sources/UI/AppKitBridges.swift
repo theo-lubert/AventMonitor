@@ -2,20 +2,23 @@ import AppKit
 import AVFoundation
 import SwiftUI
 
-/// Hosts the stream's AVSampleBufferDisplayLayer (needed for system PiP).
+/// Hosts the stream's display layers: the window's video on top, and under it the
+/// layer system PiP takes into its own window.
 struct VideoLayerView: NSViewRepresentable {
-    let layer: AVSampleBufferDisplayLayer
-    /// While PiP runs, AVKit owns the layer (it reparents it into the PiP window).
+    let videoLayer: AVSampleBufferDisplayLayer
+    /// Nil for a plain video view, such as the menu's live tile.
+    var pipLayer: AVSampleBufferDisplayLayer?
+    /// While PiP runs, AVKit owns the PiP layer (it reparents it into the PiP window).
     var pipActive = false
 
     func makeNSView(context: Context) -> LayerHostView {
         let view = LayerHostView()
-        view.hosted = layer
+        view.set(video: videoLayer, pip: pipLayer)
         return view
     }
 
     func updateNSView(_ view: LayerHostView, context: Context) {
-        if view.hosted !== layer { view.hosted = layer }
+        view.set(video: videoLayer, pip: pipLayer)
         let wasInPiP = view.pipActive
         view.pipActive = pipActive
         if wasInPiP && !pipActive { view.reclaim() }
@@ -23,17 +26,10 @@ struct VideoLayerView: NSViewRepresentable {
     }
 
     final class LayerHostView: NSView {
-        /// While PiP runs, CameraStream sizes the layer to the PiP window.
+        /// While PiP runs, CameraStream sizes the PiP layer to the PiP window.
         var pipActive = false
-        var hosted: CALayer? {
-            didSet {
-                oldValue?.removeFromSuperlayer()
-                if let hosted { layer?.addSublayer(hosted) }
-                observeHosted()
-                applyScale()
-                needsLayout = true
-            }
-        }
+        private var video: CALayer?
+        private var pip: CALayer?
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -44,15 +40,32 @@ struct VideoLayerView: NSViewRepresentable {
             rootObservation = root.observe(\.sublayers) { [weak self] _, _ in self?.relayoutOnMain() }
         }
 
-        private var rootObservation: NSKeyValueObservation?
-
         required init?(coder: NSCoder) { fatalError() }
 
-        /// Takes the layer back once PiP has handed it over.
+        private var rootObservation: NSKeyValueObservation?
+
+        func set(video: CALayer, pip: CALayer?) {
+            guard let root = layer else { return }
+            if self.video !== video {
+                self.video?.removeFromSuperlayer()
+                self.video = video
+                root.addSublayer(video)
+            }
+            if self.pip !== pip {
+                // AVKit may still hold the old one; leave it to CameraStream.
+                if self.pip?.superlayer === root { self.pip?.removeFromSuperlayer() }
+                self.pip = pip
+                if let pip { root.insertSublayer(pip, at: 0) }
+            }
+            applyScale()
+            needsLayout = true
+        }
+
+        /// Takes the PiP layer back, under the video, once PiP has handed it over.
         func reclaim() {
-            guard let hosted, let layer, hosted.superlayer !== layer else { return }
-            hosted.removeFromSuperlayer()
-            layer.addSublayer(hosted)
+            guard let pip, let root = layer, pip.superlayer !== root else { return }
+            pip.removeFromSuperlayer()
+            root.insertSublayer(pip, at: 0)
             needsLayout = true
         }
 
@@ -66,49 +79,27 @@ struct VideoLayerView: NSViewRepresentable {
         private func applyScale() {
             let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
             layer?.contentsScale = scale
-            hosted?.contentsScale = scale
+            video?.contentsScale = scale
+            pip?.contentsScale = scale
         }
 
         override func layout() {
             super.layout()
-            guard let hosted, let layer, hosted.superlayer === layer else { return }
+            guard let root = layer else { return }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             defer { CATransaction.commit() }
-            if pipActive {
-                // Never resize the display layer while PiP runs: it is kept at the
-                // PiP window's size. AVKit's "playing in picture in picture"
-                // placeholder is a sublayer of it, so it would sit at that size in
-                // the window's corner; stretch it over the whole view instead.
-                let target = hosted.convert(bounds, from: layer)
-                for sub in hosted.sublayers ?? [] where Self.isPiPIndicator(sub) && sub.frame != target {
-                    sub.frame = target
-                }
-            } else {
-                hosted.frame = bounds
-                // A display layer from an earlier PiP session that AVKit put back would
-                // sit over the current one, black.
-                for sub in layer.sublayers ?? [] where sub !== hosted && sub is AVSampleBufferDisplayLayer {
-                    sub.removeFromSuperlayer()
-                }
+            if let video, video.superlayer === root { video.frame = bounds }
+            // While PiP runs the PiP layer keeps the PiP window's size.
+            if !pipActive, let pip, pip.superlayer === root { pip.frame = bounds }
+            // A PiP layer from an earlier session that AVKit put back would sit over the video.
+            for sub in root.sublayers ?? [] where sub !== video && sub !== pip && sub is AVSampleBufferDisplayLayer {
+                sub.removeFromSuperlayer()
             }
-        }
-
-        private static func isPiPIndicator(_ layer: CALayer) -> Bool {
-            String(describing: type(of: layer)).contains("PictureInPictureIndicator")
-        }
-
-        /// The display layer is resized to the PiP window and gets the placeholder
-        /// added while PiP runs; both need the placeholder fitted again.
-        private var hostedObservations: [NSKeyValueObservation] = []
-
-        private func observeHosted() {
-            hostedObservations = []
-            guard let hosted else { return }
-            hostedObservations = [
-                hosted.observe(\.bounds) { [weak self] _, _ in self?.relayoutOnMain() },
-                hosted.observe(\.sublayers) { [weak self] _, _ in self?.relayoutOnMain() },
-            ]
+            // Keep the video on top, whatever order AVKit hands layers back in.
+            if let video, root.sublayers?.last !== video, video.superlayer === root {
+                root.addSublayer(video)
+            }
         }
 
         private func relayoutOnMain() {

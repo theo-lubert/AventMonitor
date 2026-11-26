@@ -31,7 +31,7 @@ private struct CameraPlayerView: View {
         ZStack {
             Color.black
             if isOwner == true {
-                VideoLayerView(layer: stream.layer, pipActive: stream.pipActive)
+                VideoLayerView(videoLayer: stream.videoLayer, pipLayer: stream.pipLayer, pipActive: stream.pipActive)
             }
             if stream.status != .live {
                 StatusBadge(status: stream.status)
