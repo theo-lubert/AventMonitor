@@ -127,11 +127,8 @@ final class CameraStream: NSObject, ObservableObject {
 
     private weak var window: NSWindow?
     private var wantsPiP = false
-    /// When PiP was asked for, to stop waiting for the window after a while.
+    /// When PiP was asked for, for the log.
     private var pipRequestedAt = Date.distantPast
-    private var pipStartWork: DispatchWorkItem?
-    /// Since when the window has been on screen; nil while it is hidden.
-    private var windowVisibleSince: Date?
     private var restoringFromPiP = false
     private var running = false
     private var client: RTSPClient?
@@ -532,7 +529,6 @@ final class CameraStream: NSObject, ObservableObject {
     }
 
     private var windowCloseObserver: NSObjectProtocol?
-    private var windowOcclusionObserver: NSObjectProtocol?
 
     func attach(window: NSWindow) {
         guard self.window !== window else { return }
@@ -544,19 +540,8 @@ final class CameraStream: NSObject, ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, self.window === window else { return }
                 self.window = nil
-                self.windowVisibleSince = nil
             }
         }
-        if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
-        windowOcclusionObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
-        ) { [weak self, weak window] _ in
-            MainActor.assumeIsolated {
-                guard let self, let window, self.window === window else { return }
-                self.noteWindowVisibility(window)
-            }
-        }
-        noteWindowVisibility(window)
         window.title = name
         window.isMovableByWindowBackground = true
         applyAspectRatio()
@@ -600,25 +585,8 @@ final class CameraStream: NSObject, ObservableObject {
         if pipActive { return }
         if !wantsPiP { pipRequestedAt = Date() }
         wantsPiP = true
+        videoLog.notice("\(self.name, privacy: .public): PiP requested (live \(self.status == .live, privacy: .public), controller \(self.pip != nil, privacy: .public), possible \(self.pip?.isPictureInPicturePossible ?? false, privacy: .public))")
         startPiPIfWanted()
-    }
-
-    private func noteWindowVisibility(_ window: NSWindow) {
-        if window.isVisible, window.occlusionState.contains(.visible) {
-            if windowVisibleSince == nil { windowVisibleSince = Date() }
-        } else {
-            windowVisibleSince = nil
-        }
-    }
-
-    /// Started from the menu, PiP would begin as soon as the window opens, since the
-    /// stream is already live for the menu's preview. Taking the layer into PiP before
-    /// the window has drawn it leaves the window black for good once PiP ends, even with
-    /// a fresh layer. So wait until the window has shown the video for a moment, as it
-    /// has when PiP is started from the window's own button.
-    private var windowShowsVideo: Bool {
-        guard let since = windowVisibleSince, pipLayer.superlayer != nil, !pipLayer.bounds.isEmpty else { return false }
-        return Date().timeIntervalSince(since) >= 0.5
     }
 
     func togglePiP() {
@@ -638,8 +606,10 @@ final class CameraStream: NSObject, ObservableObject {
         possibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] c, _ in
             let possible = c.isPictureInPicturePossible
             DispatchQueue.main.async {
-                self?.pipPossible = possible
-                self?.startPiPIfWanted()
+                guard let self else { return }
+                videoLog.notice("\(self.name, privacy: .public): PiP possible: \(possible, privacy: .public)")
+                self.pipPossible = possible
+                self.startPiPIfWanted()
             }
         }
         pip = controller
@@ -745,16 +715,9 @@ final class CameraStream: NSObject, ObservableObject {
     }
 
     private func startPiPIfWanted() {
-        pipStartWork?.cancel()
-        pipStartWork = nil
         guard wantsPiP, status == .live, let pip, pip.isPictureInPicturePossible, !pip.isPictureInPictureActive else { return }
-        if !windowShowsVideo, Date().timeIntervalSince(pipRequestedAt) < 5 {
-            let work = DispatchWorkItem { [weak self] in self?.startPiPIfWanted() }
-            pipStartWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
-            return
-        }
         wantsPiP = false
+        videoLog.notice("\(self.name, privacy: .public): starting PiP, \(Date().timeIntervalSince(self.pipRequestedAt), format: .fixed(precision: 2), privacy: .public) s after the request")
         pip.startPictureInPicture()
     }
 }
