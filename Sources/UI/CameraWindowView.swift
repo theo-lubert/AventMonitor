@@ -32,9 +32,6 @@ private struct CameraPlayerView: View {
             Color.black
             if isOwner == true {
                 VideoLayerView(layer: stream.layer, pipActive: stream.pipActive)
-                    // A new layer after PiP gets a new host view too, so nothing
-                    // AVKit left on the old one carries over.
-                    .id(ObjectIdentifier(stream.layer))
             }
             if stream.status != .live {
                 StatusBadge(status: stream.status)

@@ -229,11 +229,36 @@ final class CameraStream: NSObject, ObservableObject {
         layer = fresh
         renderer.flush(removingDisplayedImage: true, completionHandler: nil)
         if window != nil { setUpPiP() }
+        // AVKit hands the old layer back to the window as PiP closes, sometimes after
+        // this point, where it sits over the new one: an opaque black square. Keep it out.
+        old.removeFromSuperlayer()
+        for delay in [0.1, 0.5, 1.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak old] in
+                guard let self, let old, old !== self.layer, old.superlayer != nil else { return }
+                videoLog.notice("\(self.name, privacy: .public): old display layer came back after PiP, removing it")
+                old.removeFromSuperlayer()
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak fresh] in
             guard let self, let fresh, fresh === self.layer else { return }
             let r = fresh.sampleBufferRenderer
-            videoLog.notice("\(self.name, privacy: .public): display layer 1 s after PiP (frame \(String(describing: fresh.frame), privacy: .public), attached \(fresh.superlayer != nil, privacy: .public), window visible \(self.window?.isVisible ?? false, privacy: .public), renderer status \(r.status.rawValue, privacy: .public), ready \(r.isReadyForMoreMediaData, privacy: .public))")
+            let tree = self.window?.contentView?.layer.map { Self.describe($0) } ?? "no window"
+            videoLog.notice("\(self.name, privacy: .public): display layer 1 s after PiP (frame \(String(describing: fresh.frame), privacy: .public), attached \(fresh.superlayer != nil, privacy: .public), window visible \(self.window?.isVisible ?? false, privacy: .public), renderer status \(r.status.rawValue, privacy: .public), ready \(r.isReadyForMoreMediaData, privacy: .public)) tree: \(tree, privacy: .public)")
         }
+    }
+
+    /// The window's layer tree, for the log: what could sit over the video.
+    private static func describe(_ layer: CALayer, depth: Int = 0) -> String {
+        var s = String(describing: type(of: layer))
+        s += "\(layer.frame.integral)"
+        if layer.isHidden { s += " hidden" }
+        if layer.opacity < 1 { s += " opacity \(layer.opacity)" }
+        if let bg = layer.backgroundColor, bg.alpha > 0 { s += " bg" }
+        if layer is AVSampleBufferDisplayLayer { s += " video" }
+        let subs = layer.sublayers ?? []
+        guard !subs.isEmpty else { return s }
+        guard depth < 6 else { return s + " [\(subs.count)…]" }
+        return s + " [" + subs.map { describe($0, depth: depth + 1) }.joined(separator: ", ") + "]"
     }
 
     /// A renderer that failed, or that needs a flush to resume (after a display or GPU
@@ -788,6 +813,14 @@ extension CameraStream: AVPictureInPictureControllerDelegate, AVPictureInPicture
         Task { @MainActor in
             self.restoringFromPiP = true
             self.showWindow()
+            // The layer is still at the PiP window's size, in the corner of the window,
+            // and AVKit animates back to it: give it the whole window first.
+            if let host = self.layer.superlayer {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self.layer.frame = host.bounds
+                CATransaction.commit()
+            }
             completionHandler(true)
         }
     }

@@ -38,9 +38,13 @@ struct VideoLayerView: NSViewRepresentable {
         override init(frame: NSRect) {
             super.init(frame: frame)
             wantsLayer = true
-            layer = CALayer()
-            layer?.backgroundColor = NSColor.black.cgColor
+            let root = CALayer()
+            root.backgroundColor = NSColor.black.cgColor
+            layer = root
+            rootObservation = root.observe(\.sublayers) { [weak self] _, _ in self?.relayoutOnMain() }
         }
+
+        private var rootObservation: NSKeyValueObservation?
 
         required init?(coder: NSCoder) { fatalError() }
 
@@ -82,6 +86,11 @@ struct VideoLayerView: NSViewRepresentable {
                 }
             } else {
                 hosted.frame = bounds
+                // A display layer from an earlier PiP session that AVKit put back would
+                // sit over the current one, black.
+                for sub in layer.sublayers ?? [] where sub !== hosted && sub is AVSampleBufferDisplayLayer {
+                    sub.removeFromSuperlayer()
+                }
             }
         }
 
