@@ -101,6 +101,9 @@ final class CameraStream: NSObject, ObservableObject {
     var urlProvider: () -> URL? = { nil }
     /// Called when the user closes PiP without asking to restore the window.
     var onPiPDismissed: (() -> Void)?
+    /// Asks the app to open a window for this camera: leaving PiP when the window was
+    /// closed during it.
+    var onWindowWanted: (() -> Void)?
     /// Called when sound or movement is detected, at most once a second per kind.
     var onActivity: ((ActivityCenter.Kind) -> Void)?
     /// Called with an occasional still, for the panel's thumbnail.
@@ -120,6 +123,11 @@ final class CameraStream: NSObject, ObservableObject {
 
     private weak var window: NSWindow?
     private var wantsPiP = false
+    /// When PiP was asked for, to stop waiting for the window after a while.
+    private var pipRequestedAt = Date.distantPast
+    private var pipStartWork: DispatchWorkItem?
+    /// Since when the window has been on screen; nil while it is hidden.
+    private var windowVisibleSince: Date?
     private var restoringFromPiP = false
     private var running = false
     private var client: RTSPClient?
@@ -221,6 +229,11 @@ final class CameraStream: NSObject, ObservableObject {
         layer = fresh
         renderer.flush(removingDisplayedImage: true, completionHandler: nil)
         if window != nil { setUpPiP() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak fresh] in
+            guard let self, let fresh, fresh === self.layer else { return }
+            let r = fresh.sampleBufferRenderer
+            videoLog.notice("\(self.name, privacy: .public): display layer 1 s after PiP (frame \(String(describing: fresh.frame), privacy: .public), attached \(fresh.superlayer != nil, privacy: .public), window visible \(self.window?.isVisible ?? false, privacy: .public), renderer status \(r.status.rawValue, privacy: .public), ready \(r.isReadyForMoreMediaData, privacy: .public))")
+        }
     }
 
     /// A renderer that failed, or that needs a flush to resume (after a display or GPU
@@ -486,7 +499,7 @@ final class CameraStream: NSObject, ObservableObject {
     /// Shows the camera's open window again (bringing it back from PiP), or starts PiP
     /// from it. False if the camera has no window.
     func reveal(pip wantsPiP: Bool) -> Bool {
-        guard let window else { return false }
+        guard window != nil || pipActive else { return false }
         if wantsPiP {
             requestPiP()
             return true
@@ -495,11 +508,29 @@ final class CameraStream: NSObject, ObservableObject {
             restoringFromPiP = true
             pip?.stopPictureInPicture()
         }
-        window.makeKeyAndOrderFront(nil)
+        showWindow()
         return true
     }
 
+    /// Brings the window to the front, or opens a new one if it was closed during PiP.
+    private func showWindow() {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            onWindowWanted?()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// The window shows only the "playing in PiP" placeholder while PiP runs, so it is
+    /// hidden. AVKit has been seen bringing it back as PiP starts: hide it again.
+    private func hideWindowDuringPiP() {
+        guard pipActive, let window, window.isVisible else { return }
+        window.orderOut(nil)
+    }
+
     private var windowCloseObserver: NSObjectProtocol?
+    private var windowOcclusionObserver: NSObjectProtocol?
 
     func attach(window: NSWindow) {
         guard self.window !== window else { return }
@@ -511,8 +542,19 @@ final class CameraStream: NSObject, ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, self.window === window else { return }
                 self.window = nil
+                self.windowVisibleSince = nil
             }
         }
+        if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
+        windowOcclusionObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+        ) { [weak self, weak window] _ in
+            MainActor.assumeIsolated {
+                guard let self, let window, self.window === window else { return }
+                self.noteWindowVisibility(window)
+            }
+        }
+        noteWindowVisibility(window)
         window.title = name
         window.isMovableByWindowBackground = true
         applyAspectRatio()
@@ -554,8 +596,27 @@ final class CameraStream: NSObject, ObservableObject {
 
     func requestPiP() {
         if pipActive { return }
+        if !wantsPiP { pipRequestedAt = Date() }
         wantsPiP = true
         startPiPIfWanted()
+    }
+
+    private func noteWindowVisibility(_ window: NSWindow) {
+        if window.isVisible, window.occlusionState.contains(.visible) {
+            if windowVisibleSince == nil { windowVisibleSince = Date() }
+        } else {
+            windowVisibleSince = nil
+        }
+    }
+
+    /// Started from the menu, PiP would begin as soon as the window opens, since the
+    /// stream is already live for the menu's preview. Taking the layer into PiP before
+    /// the window has drawn it leaves the window black for good once PiP ends, even with
+    /// a fresh layer. So wait until the window has shown the video for a moment, as it
+    /// has when PiP is started from the window's own button.
+    private var windowShowsVideo: Bool {
+        guard let since = windowVisibleSince, layer.superlayer != nil, !layer.bounds.isEmpty else { return false }
+        return Date().timeIntervalSince(since) >= 0.5
     }
 
     func togglePiP() {
@@ -682,7 +743,15 @@ final class CameraStream: NSObject, ObservableObject {
     }
 
     private func startPiPIfWanted() {
+        pipStartWork?.cancel()
+        pipStartWork = nil
         guard wantsPiP, status == .live, let pip, pip.isPictureInPicturePossible, !pip.isPictureInPictureActive else { return }
+        if !windowShowsVideo, Date().timeIntervalSince(pipRequestedAt) < 5 {
+            let work = DispatchWorkItem { [weak self] in self?.startPiPIfWanted() }
+            pipStartWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+            return
+        }
         wantsPiP = false
         pip.startPictureInPicture()
     }
@@ -693,11 +762,15 @@ final class CameraStream: NSObject, ObservableObject {
 extension CameraStream: AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
     nonisolated func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
         Task { @MainActor in
+            videoLog.notice("\(self.name, privacy: .public): PiP started (window \(self.window == nil ? "none" : self.window!.isVisible ? "visible" : "hidden", privacy: .public))")
             self.pipActive = true
-            self.window?.orderOut(nil)
+            self.hideWindowDuringPiP()
             self.fitLayerToPiP()
             for delay in [0.1, 0.5, 1.5] {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self.fitLayerToPiP() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    self.hideWindowDuringPiP()
+                    self.fitLayerToPiP()
+                }
             }
         }
     }
@@ -714,8 +787,7 @@ extension CameraStream: AVPictureInPictureControllerDelegate, AVPictureInPicture
                                                 restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
         Task { @MainActor in
             self.restoringFromPiP = true
-            self.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            self.showWindow()
             completionHandler(true)
         }
     }

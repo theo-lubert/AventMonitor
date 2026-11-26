@@ -315,7 +315,8 @@ final class AppModel: ObservableObject {
         if let s = streams[cameraID] { return s }
         let s = CameraStream(cameraID: cameraID, name: camera(cameraID)?.name ?? "Caméra")
         s.urlProvider = { [weak self] in self?.streamURL(for: cameraID) }
-        s.onPiPDismissed = { [weak self] in self?.closeWindow(cameraID) }
+        s.onPiPDismissed = { [weak self] in self?.pipDismissed(cameraID) }
+        s.onWindowWanted = { [weak self] in self?.openCameraWindow?(cameraID) }
         s.onActivity = { [weak self] kind in self?.activity.report(kind, camera: cameraID) }
         s.onThumbnail = { [weak self] image in self?.thumbnails.store(image, for: cameraID) }
         s.onTalkbackWanted = { [weak self] on in self?.setTalkback(on, for: cameraID) }
@@ -352,8 +353,21 @@ final class AppModel: ObservableObject {
     /// Brings back the camera's window, or starts PiP from it, if it has one open
     /// (possibly hidden behind PiP). False if a window has to be opened.
     func revealWindow(_ cameraID: String, pip: Bool) -> Bool {
-        guard windowOwners[cameraID] != nil, let s = streams[cameraID] else { return false }
+        guard let s = streams[cameraID], windowOwners[cameraID] != nil || s.pipActive else { return false }
         return s.reveal(pip: pip)
+    }
+
+    /// Opens a camera window from code that has no SwiftUI environment. Set by the panel.
+    var openCameraWindow: ((String) -> Void)?
+
+    /// PiP was closed without going back to the window: close the window, or, if it was
+    /// already closed during PiP, stop what kept the stream for it.
+    private func pipDismissed(_ cameraID: String) {
+        if windowOwners[cameraID] != nil {
+            closeWindow(cameraID)
+        } else {
+            closeStream(cameraID)
+        }
     }
 
     /// A camera window appeared: stream with sound.
